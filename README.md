@@ -112,6 +112,9 @@ the API refuses every request (503) unless `OFM_EDITOR_OPEN=1`.
 | `/api/worlds/{slug}/scans/{name}/georef/fit` | POST  | dry run: fit control points → accuracy, per-point errors, checks, footprint |
 | `/api/worlds/{slug}/scans/{name}/georef`    | GET/PUT | the saved Georeference Annotation / fit and save (422 if a check fails) |
 | `/api/worlds/{slug}/scans/{name}/warp`      | POST   | warp with the saved georeference into `cogs/<name>.tif` (a basemap) |
+| `/api/assist`                               | GET    | which assistants are available (label reading: provider + model, never the key) |
+| `/api/worlds/{slug}/scans/{name}/trace`     | POST   | flood-fill from `seed` → lon/lat polygon citing the traced pixels |
+| `/api/worlds/{slug}/scans/{name}/read`      | POST   | read the labels in region `xywh` with the vision model → labels + a citation |
 | `/api/worlds/{slug}/layers/{layer}/cited-geojson` | GET | the layer as a validated Cited GeoJSON document (422 + reasons if it cannot be) |
 | `/api/worlds/{slug}/layers/{layer}/cited-geojson` | PUT | import a Cited GeoJSON document: merge its sources, save its features |
 | `/api/worlds/{slug}/rasters`                                | GET    | list raster sources for this world (pyramids + GeoTIFFs) with zoom/bounds/extension |
@@ -179,6 +182,34 @@ carries — in `<world>/raw/georef/<name>.json` (`backend/georef.py`).
 - **Warping** uses the same backward model as the reported accuracy and writes
   an EPSG:3857 tiled GeoTIFF with overviews to `<world>/cogs/<name>.tif`, which
   the raster discovery serves as a basemap.
+
+## Assisted tracing
+
+- **Trace** (`backend/trace.py`) — plain computer vision: flood-fill from the
+  clicked pixel within a colour tolerance, outline with holes, simplify, map
+  through the scan's georeference. The polygon cites the exact pixels it came
+  from (an `SvgSelector` with the outline and the bounding box as a
+  `FragmentSelector`). Fills that leak through a gap are flagged.
+- **Read labels** (`backend/llm.py`) — the region is cropped and sent to a
+  vision model, which transcribes the labels as written (no translation or
+  modernisation) and guesses what each names. The response includes a ready
+  citation (`method: "transcribed"`) of that region, noting which model read it.
+  Geometry never comes from the model.
+
+The model is configured only by environment, through the standard
+OpenAI-compatible `/chat/completions` API, so public and private models are
+interchangeable:
+
+| var | default | |
+|---|---|---|
+| `OFM_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | any OpenAI-compatible endpoint (OpenRouter, OpenAI, vLLM, Ollama, LM Studio…) |
+| `OFM_LLM_API_KEY` | unset | bearer key; optional for private servers |
+| `OFM_LLM_MODEL` | `google/gemini-2.5-flash` | any vision-capable model id on that endpoint |
+| `OFM_LLM_TIMEOUT` | `120` | seconds |
+
+Label reading is enabled when a key is set, or when the base URL points
+somewhere other than OpenRouter. The key stays on the server; `/api/assist`
+only reports the provider host and the model.
 
 ## Saving: non-destructive, with history
 

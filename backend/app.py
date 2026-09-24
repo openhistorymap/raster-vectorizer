@@ -53,6 +53,8 @@ class UnicodeJSONResponse(JSONResponse):
 
 from . import cited as cited_mod
 from . import georef as georef_mod
+from . import llm as llm_mod
+from . import trace as trace_mod
 from . import layer_schemas as layer_schemas_mod
 from . import manifest as manifest_mod
 from . import raster as raster_mod
@@ -384,6 +386,68 @@ def warp_scan(slug: str, name: str) -> dict[str, Any]:
     result = georef_mod.fit(georef_mod.gcps_of(ann), georef_mod.method_of(ann))
     out = georef_mod.warp(path, wdir / "cogs" / f"{name}.tif", result["forward"], result["backward"])
     return {**out, "accuracy": ann.get("accuracy"), "raster_source": name}
+
+
+# --- assisted tracing -------------------------------------------------------
+
+@app.get("/api/assist", dependencies=[Depends(require_user)])
+def get_assist() -> dict[str, Any]:
+    """Which assistants are available: tracing always; label reading when a model is configured."""
+    return {"trace": True, "read": llm_mod.public_settings()}
+
+
+@app.post("/api/worlds/{slug}/scans/{name}/trace", dependencies=[Depends(require_user)])
+def trace_scan(slug: str, name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Flood-fill from `seed` [x, y] (full-resolution px) within `tolerance` (0-255, default 32) and
+    return the region as a lon/lat polygon citing the traced pixels."""
+    wdir = _world_or_404(slug)
+    _scan_or_404(wdir, name)
+    try:
+        seed = [int(v) for v in body["seed"]][:2]
+        tolerance = int(body.get("tolerance", 32))
+        simplify = float(body.get("simplify", 1.5))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(422, "body needs seed: [x, y]; optional tolerance (0-255) and simplify (px)")
+    if not 0 <= tolerance <= 255:
+        raise HTTPException(422, "tolerance must be between 0 and 255")
+    source = trace_mod.source_of_scan(cited_mod.load_sources(wdir), name)
+    try:
+        return trace_mod.trace(wdir, name, (seed[0], seed[1]), tolerance, simplify, source)
+    except FileNotFoundError as e:
+        raise HTTPException(409, str(e))
+    except georef_mod.GeorefError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/api/worlds/{slug}/scans/{name}/read", dependencies=[Depends(require_user)])
+def read_scan(slug: str, name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Read the text labels in region `xywh` [x, y, w, h] (full-resolution px) with the configured
+    vision model. Returns the labels and a ready-made citation (method "transcribed") for the region."""
+    wdir = _world_or_404(slug)
+    path = _scan_or_404(wdir, name)
+    try:
+        xywh = [int(v) for v in body["xywh"]]
+        assert len(xywh) == 4
+    except (KeyError, TypeError, ValueError, AssertionError):
+        raise HTTPException(422, "body needs xywh: [x, y, w, h]")
+    try:
+        png = trace_mod.crop_png(path, xywh)
+    except georef_mod.GeorefError as e:
+        raise HTTPException(422, str(e))
+    try:
+        result = llm_mod.read_labels(png, body.get("hint"))
+    except llm_mod.LLMError as e:
+        status = 503 if "no model configured" in str(e) else 502
+        raise HTTPException(status, str(e))
+    citation: dict[str, Any] = {
+        "file": name, "method": "transcribed", "supports": ["name"],
+        "selector": [{"type": "FragmentSelector", "value": "xywh={},{},{},{}".format(*xywh)}],
+        "note": f"read by {result['model']}; check against the scan",
+    }
+    source = trace_mod.source_of_scan(cited_mod.load_sources(wdir), name)
+    if source:
+        citation = {"source": source, **citation}
+    return {**result, "region": xywh, "citation": citation}
 
 
 # --- per-layer JSON Schema -------------------------------------------------

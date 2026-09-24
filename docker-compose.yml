@@ -28,6 +28,10 @@ services:
       OFM_PG_PORT: ${OFM_PG_PORT:-45432}
       OFM_PG_USER: ${OFM_PG_USER:-admin}
       OFM_PG_PASSWORD: ${OFM_PG_PASSWORD:?set OFM_PG_PASSWORD in .env (see .env.example)}
+      # Label reading with an OpenAI-compatible vision model (optional; see README).
+      OFM_LLM_BASE_URL: ${OFM_LLM_BASE_URL:-https://openrouter.ai/api/v1}
+      OFM_LLM_API_KEY: ${OFM_LLM_API_KEY:-}
+      OFM_LLM_MODEL: ${OFM_LLM_MODEL:-google/gemini-2.5-flash}
     volumes:
       - /srv/ofm:/ofm
 
