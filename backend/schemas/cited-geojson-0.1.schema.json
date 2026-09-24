@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://www.openhistorymap.org/cited-geojson/0.1/schema.json",
+  "title": "Cited GeoJSON 0.1",
+  "description": "A GeoJSON FeatureCollection whose features cite the sources they come from. Cross-references (citation.source in sources, citation.file among that source's files, derivedFrom in sources, unique feature ids) are checked by tools/check.py, not by this schema.",
+  "type": "object",
+  "required": ["type", "features", "conformsTo", "sources"],
+  "properties": {
+    "type": { "const": "FeatureCollection" },
+    "@context": {
+      "description": "JSON-LD context; SHOULD be https://www.openhistorymap.org/cited-geojson/0.1/context.jsonld",
+      "oneOf": [
+        { "type": "string", "format": "uri" },
+        { "type": "array" },
+        { "type": "object" }
+      ]
+    },
+    "conformsTo": {
+      "type": "array",
+      "items": { "type": "string", "format": "uri" },
+      "contains": { "const": "https://www.openhistorymap.org/cited-geojson/0.1" }
+    },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "license": { "type": "string", "format": "uri" },
+    "creator": { "$ref": "#/$defs/stringOrStrings" },
+    "created": { "type": "string" },
+    "modified": { "type": "string" },
+    "calendar": { "$ref": "#/$defs/calendar" },
+    "sources": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "format": "iri" },
+      "additionalProperties": { "$ref": "#/$defs/source" }
+    },
+    "georeferences": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/georeference" }
+    },
+    "bbox": { "type": "array", "minItems": 4, "items": { "type": "number" } },
+    "features": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/feature" }
+    }
+  },
+  "$defs": {
+    "stringOrStrings": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+      ]
+    },
+    "calendar": {
+      "type": "object",
+      "required": ["label"],
+      "properties": {
+        "label": { "type": "string" },
+        "id": { "type": "string", "format": "uri" },
+        "epoch": { "type": "string" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["title"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["text", "map", "dataset", "image", "webpage", "software", "other"] },
+        "creator": { "$ref": "#/$defs/stringOrStrings" },
+        "issued": { "type": "string" },
+        "publisher": { "type": "string" },
+        "identifier": { "$ref": "#/$defs/stringOrStrings" },
+        "license": { "type": "string", "format": "uri" },
+        "url": { "type": "string", "format": "uri" },
+        "files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/file" }
+        },
+        "derivedFrom": {
+          "type": "array",
+          "items": { "type": "string", "format": "iri" }
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "checksum": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "url": { "type": "string", "format": "uri" },
+        "iiif": { "type": "string", "format": "uri" },
+        "mediaType": { "type": "string", "pattern": "^[a-z]+/[A-Za-z0-9.+-]+$" },
+        "label": { "type": "string" }
+      }
+    },
+    "feature": {
+      "type": "object",
+      "required": ["type", "id", "geometry", "properties"],
+      "properties": {
+        "type": { "const": "Feature" },
+        "id": {
+          "description": "Stable identifier of the feature across edits and releases.",
+          "type": "string",
+          "minLength": 1
+        },
+        "@id": { "type": "string", "format": "iri" },
+        "geometry": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": { "enum": ["Point", "MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon", "GeometryCollection"] }
+              }
+            }
+          ]
+        },
+        "properties": { "type": ["object", "null"] },
+        "when": { "$ref": "#/$defs/when" },
+        "citations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/citation" }
+        }
+      }
+    },
+    "when": {
+      "description": "Linked Places Format `when` object.",
+      "type": "object",
+      "properties": {
+        "timespans": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "minProperties": 1,
+            "properties": {
+              "start": { "$ref": "#/$defs/timepoint" },
+              "end": { "$ref": "#/$defs/timepoint" }
+            }
+          }
+        },
+        "periods": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "uri": { "type": "string", "format": "uri" }
+            }
+          }
+        },
+        "label": { "type": "string" },
+        "duration": { "type": "string" }
+      }
+    },
+    "timepoint": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "in": { "$ref": "#/$defs/edtf" },
+        "earliest": { "$ref": "#/$defs/edtf" },
+        "latest": { "$ref": "#/$defs/edtf" }
+      },
+      "not": { "anyOf": [
+        { "required": ["in", "earliest"] },
+        { "required": ["in", "latest"] }
+      ] }
+    },
+    "edtf": {
+      "description": "ISO 8601-2 / EDTF date string, e.g. 1450, -0044, 1450~, 1047/1050, 1302-05.",
+      "type": "string",
+      "pattern": "^[-+]?[0-9X]{1,}.*$"
+    },
+    "citation": {
+      "type": "object",
+      "required": ["source"],
+      "properties": {
+        "id": { "type": "string", "format": "iri" },
+        "source": { "type": "string", "format": "iri" },
+        "file": { "type": "string", "minLength": 1 },
+        "selector": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/selector" }
+        },
+        "supports": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "anyOf": [
+              { "enum": ["existence", "geometry", "name", "when"] },
+              { "type": "string", "pattern": "^properties\\.[^\\s]+$" }
+            ]
+          }
+        },
+        "method": { "enum": ["traced", "transcribed", "surveyed", "imported", "inferred", "generated"] },
+        "label": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "note": { "type": "string" },
+        "created": { "type": "string" },
+        "creator": { "$ref": "#/$defs/stringOrStrings" }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "required": ["type"],
+      "oneOf": [
+        {
+          "properties": {
+            "type": { "const": "TextQuoteSelector" },
+            "exact": { "type": "string", "minLength": 1 },
+            "prefix": { "type": "string" },
+            "suffix": { "type": "string" }
+          },
+          "required": ["exact"]
+        },
+        {
+          "properties": {
+            "type": { "const": "TextPositionSelector" },
+            "start": { "type": "integer", "minimum": 0 },
+            "end": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["start", "end"]
+        },
+        {
+          "properties": {
+            "type": { "const": "PageSelector" },
+            "pageStart": { "type": "integer", "minimum": 1 },
+            "pageEnd": { "type": "integer", "minimum": 1 },
+            "pageLabel": { "type": "string" },
+            "pageLabelEnd": { "type": "string" }
+          },
+          "required": ["pageStart"]
+        },
+        {
+          "properties": {
+            "type": { "const": "SectionSelector" },
+            "headingPath": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+            "sectionTitle": { "type": "string" }
+          },
+          "required": ["headingPath"]
+        },
+        {
+          "properties": {
+            "type": { "const": "FragmentSelector" },
+            "value": { "type": "string", "minLength": 1 },
+            "conformsTo": { "type": "string", "format": "uri" }
+          },
+          "required": ["value"]
+        },
+        {
+          "properties": {
+            "type": { "const": "SvgSelector" },
+            "value": { "type": "string", "pattern": "^\\s*<svg" }
+          },
+          "required": ["value"]
+        }
+      ]
+    },
+    "georeference": {
+      "description": "IIIF Georeference Annotation (as produced by Allmaps), with optional accuracy.",
+      "type": "object",
+      "required": ["type", "target", "body"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "const": "Annotation" },
+        "motivation": { "type": "string" },
+        "target": { "type": ["object", "string"] },
+        "body": {
+          "type": "object",
+          "required": ["type", "features"],
+          "properties": {
+            "type": { "const": "FeatureCollection" },
+            "transformation": { "type": "object" },
+            "features": {
+              "type": "array",
+              "minItems": 3,
+              "items": {
+                "type": "object",
+                "required": ["type", "properties", "geometry"],
+                "properties": {
+                  "properties": {
+                    "type": "object",
+                    "required": ["resourceCoords"],
+                    "properties": {
+                      "resourceCoords": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "accuracy": {
+          "type": "object",
+          "required": ["rmse", "unit"],
+          "properties": {
+            "rmse": { "type": "number", "minimum": 0 },
+            "unit": { "enum": ["m", "px"] },
+            "method": { "type": "string" },
+            "controlPoints": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  }
+}

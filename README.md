@@ -106,6 +106,9 @@ the API refuses every request (503) unless `OFM_EDITOR_OPEN=1`.
 | `/api/worlds/{slug}/layers/{layer}`         | GET    | FeatureCollection |
 | `/api/worlds/{slug}/layers/{layer}`         | PUT    | save layer (non-destructive, see below); returns what changed |
 | `/api/worlds/{slug}/layers/{layer}`         | DELETE | drop the layer |
+| `/api/worlds/{slug}/sources`                | GET/PUT | the world's source registry (Cited GeoJSON `sources`), validated |
+| `/api/worlds/{slug}/layers/{layer}/cited-geojson` | GET | the layer as a validated Cited GeoJSON document (422 + reasons if it cannot be) |
+| `/api/worlds/{slug}/layers/{layer}/cited-geojson` | PUT | import a Cited GeoJSON document: merge its sources, save its features |
 | `/api/worlds/{slug}/rasters`                                | GET    | list raster sources for this world (pyramids + GeoTIFFs) with zoom/bounds/extension |
 | `/api/worlds/{slug}/rasters/{source}/tiles/{z}/{x}/{y}.{ext}` | GET    | serve a tile from a named source (raw pyramid or rendered from GeoTIFF) |
 | `/api/worlds/{slug}/tiles/{z}/{x}/{y}.{ext}`                | GET    | legacy alias — first raster source |
@@ -126,6 +129,27 @@ Selected per-world from `timeline.json#mode`:
 
 If the configured adapter can't connect (e.g. PG unreachable from the
 container), the API returns 503 with a useful diagnostic message rather than 500.
+
+## Citations (Cited GeoJSON)
+
+Features can cite their sources in the
+[Cited GeoJSON](https://www.openhistorymap.org/cited-geojson/) format:
+
+- **Source registry** — `<world>/raw/sources.json`, the same object as a Cited
+  GeoJSON document's `sources` (keyed by source IRI; for OpenHistoryMap, Zotero
+  item IRIs). Validated against the vendored 0.1 schema
+  (`backend/schemas/cited-geojson-0.1.schema.json`).
+- **Citations** travel as the feature-level `citations` member. PostGIS and
+  SpatiaLite layers get a `citations` JSON column on the first save that needs
+  it; GeoJSON files keep the member as is. Citations are versioned in the edit
+  history like everything else. An absent `citations` member leaves stored ones
+  alone; `[]` clears them.
+- **Export** assembles a layer as a Cited GeoJSON document with only the
+  sources it cites (plus their `derivedFrom` ancestors) and the georeferences of
+  the scans it cites, and validates it (schema and cross-references) before
+  returning it. **Import** merges a document's sources into the registry
+  (existing entries win; differences are reported) and saves its features,
+  keeping their ids.
 
 ## Saving: non-destructive, with history
 

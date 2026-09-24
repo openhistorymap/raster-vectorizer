@@ -51,6 +51,7 @@ class UnicodeJSONResponse(JSONResponse):
             text = _scrub_surrogates(text)
         return text.encode("utf-8")
 
+from . import cited as cited_mod
 from . import layer_schemas as layer_schemas_mod
 from . import manifest as manifest_mod
 from . import raster as raster_mod
@@ -179,6 +180,64 @@ def put_layer(slug: str, layer: str, body: dict[str, Any],
         raise HTTPException(400, "body must be a GeoJSON FeatureCollection")
     summary = _call_or_503(wdir, "save_layer", layer, body, editor=user)
     return {**summary, "world": slug}
+
+
+# --- Cited GeoJSON: sources registry, export, import ---------------------
+
+def _world_or_404(slug: str) -> Path:
+    try:
+        return world_mod.world_dir(slug)
+    except FileNotFoundError:
+        raise HTTPException(404, f"unknown world: {slug}")
+
+
+def _timeline(wdir: Path) -> dict[str, Any]:
+    try:
+        return _json.loads((wdir / "timeline.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+@app.get("/api/worlds/{slug}/sources", dependencies=[Depends(require_user)])
+def get_sources(slug: str) -> dict[str, Any]:
+    """The world's source registry: Cited GeoJSON `sources`, keyed by source IRI."""
+    return cited_mod.load_sources(_world_or_404(slug))
+
+
+@app.put("/api/worlds/{slug}/sources", dependencies=[Depends(require_user)])
+def put_sources(slug: str, body: dict[str, Any]) -> dict[str, Any]:
+    wdir = _world_or_404(slug)
+    try:
+        return cited_mod.save_sources(wdir, body)
+    except cited_mod.CitedGeoJSONError as e:
+        raise HTTPException(422, {"errors": e.errors})
+
+
+@app.get("/api/worlds/{slug}/layers/{layer}/cited-geojson", dependencies=[Depends(require_user)])
+def export_cited(slug: str, layer: str) -> Response:
+    """The layer as a validated Cited GeoJSON document (422 with reasons if it cannot be)."""
+    wdir = _world_or_404(slug)
+    fc = _call_or_503(wdir, "load_layer", layer)
+    try:
+        doc = cited_mod.export_layer(wdir, _timeline(wdir), layer, fc)
+    except cited_mod.CitedGeoJSONError as e:
+        raise HTTPException(422, {"errors": e.errors})
+    return UnicodeJSONResponse(content=doc, media_type="application/geo+json",
+                               headers={"Content-Disposition": f'attachment; filename="{slug}-{layer}.geojson"'})
+
+
+@app.put("/api/worlds/{slug}/layers/{layer}/cited-geojson")
+def import_cited(slug: str, layer: str, body: dict[str, Any],
+                 user: str = Depends(require_user)) -> dict[str, Any]:
+    """Import a Cited GeoJSON document into a layer: its sources are merged into the registry
+    (existing entries win; differences are reported), its features saved like a normal save."""
+    wdir = _world_or_404(slug)
+    try:
+        fc, report = cited_mod.prepare_import(wdir, body)
+    except cited_mod.CitedGeoJSONError as e:
+        raise HTTPException(422, {"errors": e.errors})
+    summary = _call_or_503(wdir, "save_layer", layer, fc, editor=user)
+    return {**summary, "world": slug, "sources": report}
 
 
 # --- per-layer JSON Schema -------------------------------------------------

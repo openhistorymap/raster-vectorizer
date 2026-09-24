@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover
 import shapely
 from shapely.geometry import shape
 
-from .diff import (FID, HISTORY_TABLE, ROW_PREFIX, StoredRow, coerce_geometry, geometry_from_wkt,
+from .diff import (CITATIONS, FID, HISTORY_TABLE, ROW_PREFIX, StoredRow, coerce_geometry, geometry_from_wkt,
                    history_record, new_fid, plan_save)
 
 SAFE_TABLE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -148,7 +148,7 @@ class SpatiaLiteAdapter:
         geom_col = self._geom_column(table) or "the_geom"
         pks = [n for n, pos in sorted(info, key=lambda x: x[1]) if pos]
         pk = pks[0] if len(pks) == 1 else None
-        attrs = [n for n in names if n not in (geom_col, pk, FID, "properties")]
+        attrs = [n for n in names if n not in (geom_col, pk, FID, "properties", CITATIONS)]
         return geom_col, pk, attrs, "properties" in names
 
     def _read_rows(self, table: str) -> list[dict[str, Any]]:
@@ -162,6 +162,16 @@ class SpatiaLiteAdapter:
             d = dict(zip(other + ["_ofm_wkt", "_ofm_rowid"], r))
             rows.append(d)
         return rows
+
+    @staticmethod
+    def _list(value: Any) -> list | None:
+        if isinstance(value, str) and value:
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else None
+            except ValueError:
+                return None
+        return None
 
     @staticmethod
     def _extras(value: Any) -> dict[str, Any]:
@@ -187,12 +197,16 @@ class SpatiaLiteAdapter:
                     props.setdefault(k, r[k])
             fid = r.get(FID)
             key = fid if fid is not None else f"{ROW_PREFIX}{r[pk] if pk else r['_ofm_rowid']}"
-            features.append({
+            feat = {
                 "type": "Feature",
                 "id": str(key),
                 "geometry": geometry_from_wkt(r["_ofm_wkt"]),
                 "properties": props,
-            })
+            }
+            citations = self._list(r.get(CITATIONS))
+            if citations:
+                feat[CITATIONS] = citations
+            features.append(feat)
         return {"type": "FeatureCollection", "features": features}
 
     def _ensure_fid(self, layer: str) -> None:
@@ -244,9 +258,12 @@ class SpatiaLiteAdapter:
             alias = {f"{ROW_PREFIX}{r[pk] if pk else r['_ofm_rowid']}": r[FID] for r in rows}
             stored = [StoredRow(key=str(r[FID]), columns={a: r.get(a) for a in attrs},
                                 extras=self._extras(r.get("properties")) if has_props else {},
-                                geometry=geometry_from_wkt(r["_ofm_wkt"])) for r in rows]
+                                geometry=geometry_from_wkt(r["_ofm_wkt"]),
+                                citations=self._list(r.get(CITATIONS))) for r in rows]
             incoming = [{**f, "id": alias.get(str(f.get("id")), f.get("id"))} for f in feats]
             plan = plan_save(stored, incoming, attrs, has_props)
+            if plan.needs_citations_column() and CITATIONS not in self._columns(layer):
+                self.conn.execute(f"ALTER TABLE {layer} ADD COLUMN {CITATIONS} TEXT")
 
             for ch in plan.deletes:
                 self.conn.execute(f"DELETE FROM {layer} WHERE {FID} = ?", (ch.key,))
@@ -255,6 +272,9 @@ class SpatiaLiteAdapter:
                 values = [self._value(ch.columns[n]) for n in ch.columns]
                 if ch.extras is not None:
                     values.append(json.dumps(ch.extras))
+                if ch.citations is not None:
+                    names.append(CITATIONS)
+                    values.append(json.dumps(ch.citations, ensure_ascii=False))
                 col_list = ", ".join(q(n) for n in [FID, *names, geom_col])
                 ph = ", ".join(["?"] * (len(names) + 1) + ["GeomFromText(?, 4326)"])
                 self.conn.execute(f"INSERT INTO {layer} ({col_list}) VALUES ({ph})",
@@ -267,6 +287,9 @@ class SpatiaLiteAdapter:
                 if ch.extras is not None:
                     sets.append("properties = ?")
                     values.append(json.dumps(ch.extras))
+                if ch.citations is not None:
+                    sets.append(f"{CITATIONS} = ?")
+                    values.append(json.dumps(ch.citations, ensure_ascii=False))
                 if ch.geometry is not None:
                     sets.append(f"{q(geom_col)} = GeomFromText(?, 4326)")
                     values.append(wkt2d(coerce_geometry(ch.geometry, gtype)))

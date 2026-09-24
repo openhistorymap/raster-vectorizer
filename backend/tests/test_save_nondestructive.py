@@ -228,3 +228,30 @@ def test_geojson_file_keeps_ids_foreign_members_and_history(tmp_path):
 
     log = [json.loads(line) for line in (tmp_path / "w" / "raw" / "history" / "places.jsonl").read_text().splitlines()]
     assert [(r["op"], r["before"]["properties"]["name"], r["after"]["properties"]["name"]) for r in log] == [("update", "A", "A2")]
+
+
+def test_citations_column_is_added_and_round_trips(backend):
+    a, history = backend
+    cit = [{"source": "https://example.org/src", "method": "traced", "supports": ["geometry"],
+            "selector": [{"type": "FragmentSelector", "value": "xywh=1,2,3,4"}]}]
+    fc = a.load_layer("politics")
+    _by_name(fc)["Wengnga"]["citations"] = cit
+    s = a.save_layer("politics", fc, editor="tester")
+    assert s["updated"] == 1 and s["unchanged"] == 1
+    loaded = _by_name(a.load_layer("politics"))
+    assert loaded["Wengnga"]["citations"] == cit
+    assert "citations" not in loaded["Fisar"]
+    assert loaded["Wengnga"]["properties"]["subclass"] == "city league"   # columns untouched
+
+    fc = a.load_layer("politics")
+    del _by_name(fc)["Wengnga"]["citations"]          # absent: keep
+    assert a.save_layer("politics", fc)["unchanged"] == 2
+    assert _by_name(a.load_layer("politics"))["Wengnga"]["citations"] == cit
+
+    fc = a.load_layer("politics")
+    _by_name(fc)["Wengnga"]["citations"] = []          # explicit empty: clear
+    a.save_layer("politics", fc)
+    assert "citations" not in _by_name(a.load_layer("politics"))["Wengnga"]
+
+    updates = [r for r in history() if r["op"] == "update"]
+    assert updates[0]["after"]["citations"] == cit and "citations" not in updates[0]["before"]

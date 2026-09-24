@@ -26,6 +26,7 @@ from shapely.geometry import mapping, shape
 
 HISTORY_TABLE = "_ofm_history"
 FID = "fid"
+CITATIONS = "citations"   # feature-level member (Cited GeoJSON) and its storage column
 ROW_PREFIX = "row:"
 
 
@@ -73,6 +74,7 @@ class StoredRow:
     columns: dict[str, Any]        # attribute columns (no pk, fid, geometry, properties)
     extras: dict[str, Any]         # contents of the `properties` JSON column, if any
     geometry: dict | None          # GeoJSON geometry
+    citations: list | None = None  # Cited GeoJSON citations, if the layer stores them
 
 
 @dataclass
@@ -84,6 +86,7 @@ class RowChange:
     geometry: dict | None
     before: dict | None            # history image before the change
     after: dict | None             # history image after the change
+    citations: list | None = None  # new citations to write, or None to leave them alone
 
 
 @dataclass
@@ -93,6 +96,9 @@ class SavePlan:
     deletes: list[RowChange] = field(default_factory=list)
     unchanged: int = 0
     unstored: set[str] = field(default_factory=set)
+
+    def needs_citations_column(self) -> bool:
+        return any(ch.citations for ch in self.inserts + self.updates)
 
     def summary(self, layer: str) -> dict[str, Any]:
         return {
@@ -106,9 +112,16 @@ class SavePlan:
         }
 
 
-def _image(columns: dict, extras: dict, geometry: dict | None) -> dict:
+def _image(columns: dict, extras: dict, geometry: dict | None, citations: list | None = None) -> dict:
     props = {**extras, **{k: v for k, v in columns.items() if v is not None}}
-    return {"properties": props, "geometry": geometry}
+    image = {"properties": props, "geometry": geometry}
+    if citations:
+        image[CITATIONS] = citations
+    return image
+
+
+def _same_json(a: Any, b: Any) -> bool:
+    return json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
 
 
 def plan_save(stored: list[StoredRow], incoming: list[dict], columns: list[str],
@@ -132,6 +145,10 @@ def plan_save(stored: list[StoredRow], incoming: list[dict], columns: list[str],
             raise SaveRejected(f"feature {i}: has no geometry")
         props = dict(feat.get("properties") or {})
         props.pop(FID, None)
+        props.pop(CITATIONS, None)
+        citations = feat.get(CITATIONS)
+        if citations is not None and not isinstance(citations, list):
+            raise SaveRejected(f"feature {i}: `citations` must be an array")
         fid = feat.get("id")
         key = str(fid) if fid is not None else None
         if key in seen:
@@ -150,7 +167,8 @@ def plan_save(stored: list[StoredRow], incoming: list[dict], columns: list[str],
             extras = extra_vals if has_extras_column else None
             plan.inserts.append(RowChange(
                 key=None, fid=fid_value, columns=col_vals, extras=extras, geometry=geometry,
-                before=None, after=_image(col_vals, extra_vals, geometry)))
+                before=None, after=_image(col_vals, extra_vals, geometry, citations),
+                citations=citations or None))
             if key is not None:
                 seen.add(key)
             continue
@@ -160,7 +178,9 @@ def plan_save(stored: list[StoredRow], incoming: list[dict], columns: list[str],
         extras_changed = has_extras_column and json.dumps(extra_vals, sort_keys=True, default=str) != \
             json.dumps(row.extras, sort_keys=True, default=str)
         geom_changed = normalise_geometry(geometry) != normalise_geometry(row.geometry)
-        if not (changed_cols or extras_changed or geom_changed):
+        # An absent `citations` member leaves stored citations alone; [] clears them.
+        cit_changed = citations is not None and not _same_json(citations, row.citations or [])
+        if not (changed_cols or extras_changed or geom_changed or cit_changed):
             plan.unchanged += 1
             continue
         after_cols = {**row.columns, **col_vals}
@@ -168,14 +188,16 @@ def plan_save(stored: list[StoredRow], incoming: list[dict], columns: list[str],
             key=row.key, fid=row.key,
             columns=changed_cols, extras=extra_vals if extras_changed else None,
             geometry=geometry if geom_changed else None,
-            before=_image(row.columns, row.extras, row.geometry),
-            after=_image(after_cols, extra_vals if has_extras_column else row.extras, geometry)))
+            before=_image(row.columns, row.extras, row.geometry, row.citations),
+            after=_image(after_cols, extra_vals if has_extras_column else row.extras, geometry,
+                         citations if citations is not None else row.citations),
+            citations=citations if cit_changed else None))
 
     for row in stored:
         if row.key not in seen:
             plan.deletes.append(RowChange(
                 key=row.key, fid=row.key, columns={}, extras=None, geometry=None,
-                before=_image(row.columns, row.extras, row.geometry), after=None))
+                before=_image(row.columns, row.extras, row.geometry, row.citations), after=None))
     return plan
 
 

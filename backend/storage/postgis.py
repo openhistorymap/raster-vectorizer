@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover
 import shapely
 from shapely.geometry import shape
 
-from .diff import (FID, HISTORY_TABLE, ROW_PREFIX, SaveRejected, StoredRow, coerce_geometry,
+from .diff import (CITATIONS, FID, HISTORY_TABLE, ROW_PREFIX, SaveRejected, StoredRow, coerce_geometry,
                    geometry_from_wkt, history_record, plan_save)
 
 SAFE_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -49,6 +49,15 @@ def q(name: str) -> str:
 def wkt2d(geometry: dict) -> str:
     """WKT without Z/M: OFM layers are 2-D, and some sources pad coordinates with a dummy Z."""
     return shapely.force_2d(shape(geometry)).wkt
+
+
+def _json_list(value: Any) -> list | None:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    return value if isinstance(value, list) else None
 
 
 def jsonb(value: Any) -> Any:
@@ -181,7 +190,7 @@ class PostGISAdapter:
         if geom_col is None:
             raise RuntimeError("no geometry column")
         pk = "id" if "id" in cols else None
-        attrs = [n for n in cols if n not in (geom_col, pk, FID, "properties")]
+        attrs = [n for n in cols if n not in (geom_col, pk, FID, "properties", CITATIONS)]
         return geom_col, pk, attrs
 
     def _read_rows(self, conn, layer: str, cols: dict[str, str]) -> list[dict[str, Any]]:
@@ -205,12 +214,16 @@ class PostGISAdapter:
                     if r[col] is not None:
                         props.setdefault(col, r[col])
                 fid = r.get(FID)
-                feats.append({
+                feat = {
                     "type": "Feature",
                     "id": str(fid) if fid is not None else f"{ROW_PREFIX}{r[pk]}" if pk else None,
                     "geometry": geometry_from_wkt(r["_ofm_wkt"]),
                     "properties": props,
-                })
+                }
+                citations = _json_list(r.get(CITATIONS))
+                if citations:
+                    feat[CITATIONS] = citations
+                feats.append(feat)
             return {"type": "FeatureCollection", "features": feats}
 
     def _value(self, udt: str, value: Any) -> Any:
@@ -249,9 +262,13 @@ class PostGISAdapter:
                 key=str(r[FID]),
                 columns={a: r[a] for a in attrs},
                 extras=dict(r["properties"]) if isinstance(r.get("properties"), dict) else {},
-                geometry=geometry_from_wkt(r["_ofm_wkt"])) for r in rows]
+                geometry=geometry_from_wkt(r["_ofm_wkt"]),
+                citations=_json_list(r.get(CITATIONS))) for r in rows]
             incoming = [{**f, "id": pk_to_fid.get(str(f.get("id")), f.get("id"))} for f in feats]
             plan = plan_save(stored, incoming, attrs, "properties" in cols)
+            if plan.needs_citations_column() and CITATIONS not in cols:
+                c.execute(f"ALTER TABLE {layer} ADD COLUMN {CITATIONS} jsonb")
+                cols = self._columns(c, layer)
 
             with c.cursor() as cur:
                 for ch in plan.deletes:
@@ -265,6 +282,9 @@ class PostGISAdapter:
                     values = [self._value(cols[n], ch.columns[n]) for n in ch.columns]
                     if ch.extras is not None:
                         values.append(self._value(cols["properties"], ch.extras))
+                    if ch.citations is not None:
+                        names.append(CITATIONS)
+                        values.append(jsonb(ch.citations))
                     if next_pk is not None:
                         names.insert(0, pk)
                         values.insert(0, next_pk)
@@ -281,6 +301,9 @@ class PostGISAdapter:
                     if ch.extras is not None:
                         sets.append('"properties" = %s')
                         values.append(self._value(cols["properties"], ch.extras))
+                    if ch.citations is not None:
+                        sets.append(f"{CITATIONS} = %s")
+                        values.append(jsonb(ch.citations))
                     if ch.geometry is not None:
                         sets.append(f"{q(geom_col)} = ST_GeomFromText(%s, 4326)")
                         values.append(wkt2d(coerce_geometry(ch.geometry, gtype)))

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .diff import ROW_PREFIX, StoredRow, history_record, new_fid, plan_save
+from .diff import CITATIONS, ROW_PREFIX, StoredRow, history_record, new_fid, plan_save
 
 SAFE_NAME = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
@@ -75,19 +75,24 @@ class GeoJSONFileAdapter:
             key = str(f["id"]) if f.get("id") is not None else new_fid()
             alias[f"{ROW_PREFIX}{i}"] = key
             stored.append(StoredRow(key=key, columns={}, extras=dict(f.get("properties") or {}),
-                                    geometry=f.get("geometry")))
+                                    geometry=f.get("geometry"), citations=f.get(CITATIONS)))
         incoming = [{**f, "id": alias.get(str(f.get("id")), f.get("id"))}
                     for f in feature_collection.get("features", [])]
         plan = plan_save(stored, incoming, [], has_extras_column=True)
 
         # Rebuild in the incoming order, with every feature carrying its stable id.
         new_ids = iter(ch.fid for ch in plan.inserts)
-        known = {r.key for r in stored}
+        stored_citations = {r.key: r.citations for r in stored}
         out = []
         for f in incoming:
-            fid = str(f["id"]) if f.get("id") is not None and str(f["id"]) in known else next(new_ids)
-            out.append({"type": "Feature", "id": fid, "geometry": f.get("geometry"),
-                        "properties": {k: v for k, v in (f.get("properties") or {}).items() if k != "fid"}})
+            fid = str(f["id"]) if f.get("id") is not None and str(f["id"]) in stored_citations else next(new_ids)
+            feat = {"type": "Feature", "id": fid, "geometry": f.get("geometry"),
+                    "properties": {k: v for k, v in (f.get("properties") or {}).items()
+                                   if k not in ("fid", CITATIONS)}}
+            citations = f[CITATIONS] if CITATIONS in f else stored_citations.get(fid)
+            if citations:
+                feat[CITATIONS] = citations
+            out.append(feat)
         doc["features"] = out
         tmp = p.with_suffix(".geojson.tmp")
         tmp.write_text(json.dumps(doc, indent=1, ensure_ascii=False), encoding="utf-8")
