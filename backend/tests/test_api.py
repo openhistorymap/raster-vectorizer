@@ -127,3 +127,20 @@ def test_save_reports_changes_and_rejects_bad_geometry(client):
     r = client.put("/api/worlds/fakeworld/layers/pts", json={"type": "FeatureCollection",
                                                           "features": [{**pt, "geometry": None}]})
     assert r.status_code == 422
+
+
+def test_append_features_inserts_without_touching_existing(client):
+    pt = lambda n, x: {"type": "Feature", "geometry": {"type": "Point", "coordinates": [x, 0]},  # noqa: E731
+                       "properties": {"name": n}}
+    client.put("/api/worlds/fakeworld/layers/pts", json={"type": "FeatureCollection", "features": [pt("a", 0)]})
+    before = client.get("/api/worlds/fakeworld/layers/pts").json()["features"]
+    r = client.post("/api/worlds/fakeworld/layers/pts/features",
+                    json={"features": [{**pt("b", 1), "id": before[0]["id"]}, pt("c", 2)]})   # an id is ignored
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert (out["inserted"], out["updated"], out["deleted"], out["unchanged"]) == (2, 0, 0, 1)
+    after = {f["properties"]["name"]: f["id"] for f in client.get("/api/worlds/fakeworld/layers/pts").json()["features"]}
+    assert after["a"] == before[0]["id"] and set(out["ids"]) == {after["b"], after["c"]}
+    r = client.post("/api/worlds/fakeworld/layers/brand_new/features", json={"features": [pt("x", 0)]})
+    assert r.status_code == 200 and r.json()["inserted"] == 1
+    assert client.post("/api/worlds/fakeworld/layers/pts/features", json={"features": []}).status_code == 422

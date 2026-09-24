@@ -185,6 +185,31 @@ def put_layer(slug: str, layer: str, body: dict[str, Any],
     return {**summary, "world": slug}
 
 
+@app.post("/api/worlds/{slug}/layers/{layer}/features")
+def append_features(slug: str, layer: str, body: dict[str, Any],
+                    user: str = Depends(require_user)) -> dict[str, Any]:
+    """Add features to a layer without resending it (used by the georeferencing workbench).
+    Every feature is inserted as new; existing features are left exactly as they are."""
+    wdir = _world_or_404(slug)
+    new = body.get("features")
+    if not isinstance(new, list) or not new:
+        raise HTTPException(422, "body needs a non-empty `features` array")
+    new = [{k: v for k, v in f.items() if k != "id"} for f in new]      # always inserts
+    try:
+        current = _call_or_503(wdir, "load_layer", layer)
+    except HTTPException as e:
+        if e.status_code != 503 or "not found" not in str(e.detail):
+            raise
+        current = {"features": []}                                      # new layer
+    before = {str(f.get("id")) for f in current.get("features", [])}
+    summary = _call_or_503(wdir, "save_layer", layer,
+                           {"type": "FeatureCollection", "features": current.get("features", []) + new},
+                           editor=user)
+    after = _call_or_503(wdir, "load_layer", layer)
+    summary["ids"] = [str(f["id"]) for f in after["features"] if str(f.get("id")) not in before]
+    return {**summary, "world": slug}
+
+
 # --- Cited GeoJSON: sources registry, export, import ---------------------
 
 def _world_or_404(slug: str) -> Path:

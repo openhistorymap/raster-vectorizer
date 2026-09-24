@@ -277,6 +277,8 @@ async function init() {
 
 async function onWorldChange(slug, opts = {}) {
   currentWorld = slug;
+  document.getElementById("georef-link").href = `./georef.html?world=${encodeURIComponent(slug)}`;
+  sourcesRegistry = await fetchJSON(`/api/worlds/${slug}/sources`).catch(() => ({}));
   if (currentMode === "map") await loadWorldMap(slug);
   else await loadManifest(slug, MANIFEST_KINDS[currentMode]);
   if (!opts.skipUrl) writeUrlState();  // push — user can back-button to previous world
@@ -306,6 +308,8 @@ let currentAtDate = null;       // ISO date string driving timed sources
 // Draw has in its own snapshot at the moment.
 let loadedFeatures = [];        // [{type:'Feature', id, geometry, properties}]
 let editedProperties = new Map(); // id -> partial properties (overrides)
+let editedCitations = new Map();  // id -> full replacement citations array (Cited GeoJSON)
+let sourcesRegistry = {};         // the world's sources, keyed by IRI
 let selectedFeatureId = null;
 let nextLocalId = 1;
 
@@ -804,6 +808,94 @@ function onSelectionChange(e) {
       setDirty(true);
     });
   });
+  renderCitations(String(f.id));
+}
+
+// --- citations (Cited GeoJSON) ------------------------------------------
+
+function citationsOf(id) {
+  if (editedCitations.has(id)) return editedCitations.get(id);
+  return loadedFeatures.find((x) => x.id === id)?.citations || [];
+}
+
+function describeCitation(c) {
+  const src = sourcesRegistry[c.source]?.title || c.source || "(no source)";
+  const where = c.label || (c.selector || []).map((sel) => {
+    if (sel.type === "PageSelector") return `p. ${sel.pageLabel || sel.pageStart}`;
+    if (sel.type === "TextQuoteSelector") return `“${sel.exact.slice(0, 60)}${sel.exact.length > 60 ? "…" : ""}”`;
+    if (sel.type === "SectionSelector") return sel.headingPath.join(" › ");
+    if (sel.type === "FragmentSelector") return sel.value;
+    return null;
+  }).filter(Boolean).join(", ");
+  return { src, where, how: [c.method, (c.supports || ["existence"]).join(", ")].filter(Boolean).join(" · ") };
+}
+
+function renderCitations(id) {
+  const box = document.createElement("div");
+  box.className = "citations";
+  const list = citationsOf(id);
+  box.innerHTML = `<div class="side-row"><h3>Citations (${list.length})</h3></div>` +
+    (list.length ? "" : `<p class="hint">No sources cited yet.</p>`);
+  list.forEach((c, i) => {
+    const d = describeCitation(c);
+    const row = document.createElement("div");
+    row.className = "citation";
+    row.innerHTML = `<div><strong></strong><div class="hint"></div><div class="hint"></div></div>
+      <button class="mini-btn" title="remove this citation">×</button>`;
+    row.querySelector("strong").textContent = d.src;
+    row.querySelectorAll(".hint")[0].textContent = d.where;
+    row.querySelectorAll(".hint")[1].textContent = d.how;
+    row.querySelector("button").addEventListener("click", () => {
+      editedCitations.set(id, list.filter((_, j) => j !== i));
+      setDirty(true);
+      renderCitations(id);
+    });
+    box.appendChild(row);
+  });
+
+  const iris = Object.keys(sourcesRegistry);
+  const form = document.createElement("form");
+  form.className = "citation-form";
+  form.innerHTML = iris.length ? `
+    <select name="source" required></select>
+    <div class="row2">
+      <select name="method">
+        <option>transcribed</option><option>traced</option><option>inferred</option>
+        <option>imported</option><option>surveyed</option><option>generated</option>
+      </select>
+      <input name="page" type="number" min="1" placeholder="page" />
+    </div>
+    <input name="quote" placeholder="quoted passage (optional)" />
+    <div class="supports">supports:
+      ${["existence", "geometry", "name", "when"].map((t) => `<label><input type="checkbox" name="supports" value="${t}" ${t === "existence" ? "checked" : ""}> ${t}</label>`).join("")}
+    </div>
+    <button class="mini-btn" type="submit">+ citation</button>` :
+    `<p class="hint">Add sources to the world's registry (<code>raw/sources.json</code>) to cite them.</p>`;
+  if (iris.length) {
+    const sel = form.querySelector("select[name=source]");
+    iris.forEach((iri) => {
+      const o = document.createElement("option");
+      o.value = iri;
+      o.textContent = sourcesRegistry[iri].title;
+      sel.appendChild(o);
+    });
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const selector = [];
+      if (fd.get("quote")) selector.push({ type: "TextQuoteSelector", exact: String(fd.get("quote")) });
+      if (fd.get("page")) selector.push({ type: "PageSelector", pageStart: parseInt(fd.get("page"), 10), pageLabel: String(fd.get("page")) });
+      const supports = fd.getAll("supports");
+      const c = { source: String(fd.get("source")), method: String(fd.get("method")),
+                  ...(supports.length ? { supports } : {}), ...(selector.length ? { selector } : {}) };
+      editedCitations.set(id, [...list, c]);
+      setDirty(true);
+      renderCitations(id);
+    });
+  }
+  box.appendChild(form);
+  $props.querySelector(".citations")?.remove();
+  $props.appendChild(box);
 }
 
 function initTerraDraw() {
@@ -924,8 +1016,10 @@ function loadFeaturesIntoState(fc) {
       _multi: f._multi || false,
       geometry: f.geometry,
       properties: { ...(f.properties || {}) },
+      citations: f.citations || [],
     }));
   editedProperties.clear();
+  editedCitations.clear();
   selectedFeatureId = null;
   // Clear terra-draw so any leftover in-progress geometry doesn't bleed in.
   if (draw) { try { draw.clear(); } catch {} }
@@ -1801,9 +1895,12 @@ $save.addEventListener("click", async () => {
       // their pending edits merged. Ids go back to the server, which matches
       // them against the stored features: changed ones are updated, missing
       // ones deleted, and new ones (id "new_N") inserted with a permanent id.
+      // Citations are sent only for features whose citations were edited;
+      // the server leaves everyone else's stored citations alone.
       const features = joinParts(loadedFeatures).map((f) => ({
         type: "Feature",
         id: f.id,
+        ...(editedCitations.has(f.id) ? { citations: editedCitations.get(f.id) } : {}),
         geometry: f.geometry,
         properties: {
           ...(f.properties || {}),

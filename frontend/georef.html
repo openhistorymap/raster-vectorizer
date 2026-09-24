@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OFM georeferencing</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%235fa8d3'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <link rel="stylesheet" href="./style.css" />
+  <link rel="stylesheet" href="./georef.css" />
+  <script src="./config.js"></script>
+</head>
+<body class="georef">
+  <header>
+    <a class="title" href="./index.html" id="to-editor" title="Back to the layer editor">OFM editor</a>
+    <span class="crumb">georeferencing</span>
+    <label>World <select id="world-select"></select></label>
+    <label>Scan <select id="scan-select"></select></label>
+    <button id="upload-btn" title="Upload a scanned map">+ scan</button>
+    <input id="upload-input" type="file" accept=".png,.jpg,.jpeg,.tif,.tiff,.webp" hidden />
+    <label>Basemap
+      <select id="basemap-select">
+        <option value="world">world style</option>
+        <option value="osm">OpenStreetMap</option>
+      </select>
+    </label>
+    <span id="status"></span>
+  </header>
+
+  <main id="gr-main">
+    <section id="scan-pane" aria-label="Scan">
+      <div id="scan-view">
+        <div id="scan-stage">
+          <img id="scan-img" alt="" draggable="false" />
+          <svg id="scan-overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+        <p id="scan-empty" class="hint">Upload or choose a scan to start.</p>
+      </div>
+      <div class="pane-hint" id="scan-hint">scroll to zoom · drag to pan</div>
+    </section>
+
+    <section id="map-pane" aria-label="Map">
+      <div id="gr-map"></div>
+      <div class="pane-hint" id="map-hint">map</div>
+    </section>
+
+    <aside id="gr-side">
+      <div class="mode-row" role="tablist" aria-label="Tool">
+        <button data-mode="gcp" class="mode-btn active" role="tab">Control points</button>
+        <button data-mode="trace" class="mode-btn" role="tab">Trace</button>
+        <button data-mode="read" class="mode-btn" role="tab">Read labels</button>
+      </div>
+
+      <div data-panel="gcp">
+        <p class="hint">Click a place on the scan, then the same place on the map (either order). Esc cancels.</p>
+        <div class="field-row">
+          <label>Transformation
+            <select id="method-select">
+              <option value="polynomial1">polynomial 1 (affine)</option>
+              <option value="polynomial2">polynomial 2</option>
+              <option value="polynomial3">polynomial 3</option>
+              <option value="tps">thin-plate spline</option>
+            </select>
+          </label>
+          <label>Expected width (m)
+            <input id="expected-input" type="number" min="0" step="any" placeholder="optional" />
+          </label>
+        </div>
+        <table id="gcp-table">
+          <thead><tr><th>#</th><th>pixel</th><th>lon, lat</th><th title="residual after fitting">res. m</th><th title="error when this point is left out of the fit">LOO m</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="accuracy" class="hint">—</div>
+        <ul id="checks"></ul>
+        <div class="button-row">
+          <button id="save-georef-btn" disabled>Save georeference</button>
+          <button id="warp-btn" disabled title="Warp the scan into a basemap GeoTIFF">Warp to basemap</button>
+        </div>
+      </div>
+
+      <div data-panel="trace" hidden>
+        <p class="hint">Click inside a shape on the scan to trace it. The result cites the pixels it came from.</p>
+        <label class="stack">Colour tolerance <span id="tolerance-readout">32</span>
+          <input id="tolerance-input" type="range" min="1" max="120" value="32" />
+        </label>
+      </div>
+
+      <div data-panel="read" hidden>
+        <p class="hint" id="read-hint">Drag a box around labels on the scan to read them.</p>
+        <label class="stack">Context for the model (optional)
+          <input id="read-context" type="text" placeholder="e.g. Bologna, 1702, Italian" />
+        </label>
+        <ul id="labels"></ul>
+      </div>
+
+      <div id="pending-feature" hidden>
+        <h3>New feature</h3>
+        <div id="pending-warnings"></div>
+        <label class="stack">Name <input id="feature-name" type="text" /></label>
+        <label class="stack">Add to layer
+          <select id="target-layer"></select>
+        </label>
+        <div class="button-row">
+          <button id="add-feature-btn">Add to layer</button>
+          <button id="discard-feature-btn">Discard</button>
+        </div>
+        <p class="hint" id="feature-citations"></p>
+      </div>
+    </aside>
+  </main>
+
+  <div id="login-overlay" hidden>
+    <form id="login-form">
+      <h2>OFM editor</h2>
+      <p class="hint">Sign in to edit. Credentials are kept in this tab only.</p>
+      <label>User<input id="login-user" type="text" autocomplete="username" required></label>
+      <label>Password<input id="login-pass" type="password" autocomplete="current-password" required></label>
+      <div class="login-error" id="login-error" hidden></div>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+
+  <script type="module" src="./georef.js"></script>
+</body>
+</html>

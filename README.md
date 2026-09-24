@@ -106,6 +106,7 @@ the API refuses every request (503) unless `OFM_EDITOR_OPEN=1`.
 | `/api/worlds/{slug}/layers/{layer}`         | GET    | FeatureCollection |
 | `/api/worlds/{slug}/layers/{layer}`         | PUT    | save layer (non-destructive, see below); returns what changed |
 | `/api/worlds/{slug}/layers/{layer}`         | DELETE | drop the layer |
+| `/api/worlds/{slug}/layers/{layer}/features` | POST  | add features (always inserts; the rest of the layer is untouched) |
 | `/api/worlds/{slug}/sources`                | GET/PUT | the world's source registry (Cited GeoJSON `sources`), validated |
 | `/api/worlds/{slug}/scans`                  | GET/POST | list / upload scanned maps (optionally registering the file under a source, with checksum) |
 | `/api/worlds/{slug}/scans/{name}/image?max=N` | GET  | PNG preview; `X-Scale` header converts preview px to full-resolution px |
@@ -182,6 +183,28 @@ carries — in `<world>/raw/georef/<name>.json` (`backend/georef.py`).
 - **Warping** uses the same backward model as the reported accuracy and writes
   an EPSG:3857 tiled GeoTIFF with overviews to `<world>/cogs/<name>.tif`, which
   the raster discovery serves as a basemap.
+
+## Georeferencing workbench (`georef.html`)
+
+A second page next to the editor (header link *georeference ↗*), sharing its
+sign-in:
+
+- **Scan ↔ map side by side**: upload a scan (optionally registering it under a
+  source), zoom and pan it, and click matching places on the scan and on the map
+  (the world's style or OpenStreetMap) to add control points.
+- **Live accuracy**: every change re-fits and shows the RMSE, the leave-one-out
+  error, per-point errors (the worst point highlighted), the checks, and the
+  image's footprint on the map. Save the georeference, then *Warp to basemap*.
+- **Trace**: click inside a shape on the scan; the traced polygon appears on
+  both sides and can be added to any layer (or a new one) with its citation.
+- **Read labels**: drag a box around labels; the configured model transcribes
+  them, and *use as name* names the traced feature and adds a `transcribed`
+  citation of that region.
+
+In the layer editor, the selected feature's panel lists its **citations**
+(source, where, method, what they support) and can add or remove them using
+the world's source registry. A save sends citations only for features whose
+citations were edited, so nothing else is rewritten.
 
 ## Assisted tracing
 
@@ -402,7 +425,10 @@ crash the encode step.
 
 - **`?storage=` override**: API currently follows `timeline.json#mode` strictly.
   Letting the user pick a non-default backend per-edit is on the roadmap.
-- **Vision-assist**: the old `segment`/`palette` CLI lives in `tools/` for batch
-  use; not yet surfaced as a "trace by color" button in the editor UI.
+- **Line tracing**: click-to-trace fills areas; roads, rivers and walls drawn as
+  lines on a scan are not yet traced to centre lines.
+- **Citation editing** in the layer editor covers source, method, page, quote
+  and `supports`; section and image-region selectors come from the
+  georeferencing workbench only.
 - **Temporal (atDate)**: OFM supports temporal queries; the editor ignores
   the date dimension for now.
