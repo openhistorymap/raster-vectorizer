@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OFM editor</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+  <link rel="stylesheet" href="./style.css" />
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <!-- Terra Draw needs window.maplibreGl (camelCase) — the maplibre-gl UMD
+       bundle exposes window.maplibregl (lowercase). Alias before the adapter
+       loads, otherwise the adapter throws "cannot read properties of undefined". -->
+  <script>window.maplibreGl = window.maplibregl;</script>
+  <script src="https://cdn.jsdelivr.net/npm/terra-draw@1/dist/terra-draw.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/terra-draw-maplibre-gl-adapter@1/dist/terra-draw-maplibre-gl-adapter.umd.js"></script>
+
+  <!-- Monaco loader (lazy-init'd from editor.js when the user opens a manifest) -->
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.50.0/min/vs/loader.min.js"></script>
+
+  <!-- @json-editor/json-editor — form view for timeline/gaia/render -->
+  <script src="https://cdn.jsdelivr.net/npm/@json-editor/json-editor@2.15.2/dist/jsoneditor.min.js"></script>
+
+  <script src="./config.js"></script>
+</head>
+<body>
+  <header>
+    <span class="title">OFM editor</span>
+    <label>World
+      <select id="world-select"></select>
+    </label>
+    <div class="mode-toggle" role="tablist">
+      <button data-view="map"      class="mode-btn active">Map</button>
+      <button data-view="timeline" class="mode-btn">timeline.json</button>
+      <button data-view="gaia"     class="mode-btn">gaia.json</button>
+      <button data-view="map_json" class="mode-btn">map.json</button>
+      <button data-view="render"   class="mode-btn">render.json</button>
+      <button data-view="orbitals" class="mode-btn">orbitals.json</button>
+    </div>
+    <label id="basemap-wrap">Basemap
+      <select id="basemap-select"></select>
+    </label>
+    <label id="layer-wrap">Layer
+      <select id="layer-select"></select>
+    </label>
+    <button id="new-layer-btn">+ layer</button>
+    <button id="save-btn" disabled>save</button>
+    <button id="reload-btn">reload</button>
+    <span id="status"></span>
+  </header>
+
+  <main>
+    <!-- Map editor view -->
+    <section id="map-view" class="view active">
+      <div id="map-wrap">
+        <div id="time-bar" hidden>
+          <label>atDate
+            <input id="time-input" type="date">
+          </label>
+          <input id="time-slider" type="range" step="1">
+          <span id="time-readout" class="hint">—</span>
+        </div>
+        <div id="map"></div>
+      </div>
+      <aside id="side">
+        <div class="side-row">
+          <h3>Feature</h3>
+          <button id="add-feature-btn" class="mini-btn" disabled>+ feature</button>
+        </div>
+        <div id="props">select a feature to edit its properties</div>
+        <hr/>
+        <div class="side-row">
+          <h3>Layer schema</h3>
+          <button id="add-field-btn" class="mini-btn">+ field</button>
+        </div>
+        <pre id="schema-summary">—</pre>
+        <hr/>
+        <h3>View controls</h3>
+        <div id="togglables" class="hint">(none defined in map.json)</div>
+        <hr/>
+        <h3>Layer info</h3>
+        <pre id="layer-info">—</pre>
+      </aside>
+    </section>
+
+    <!-- Manifest editor view (one container, target file selected via mode toggle) -->
+    <section id="manifest-view" class="view">
+      <div id="manifest-main">
+        <div class="view-toggle" id="manifest-view-toggle">
+          <button data-pane="raw"  class="pane-btn active">Raw</button>
+          <button data-pane="form" class="pane-btn" id="manifest-form-btn">Form</button>
+        </div>
+        <div id="manifest-editor"></div>
+        <div id="manifest-form" hidden></div>
+      </div>
+      <aside id="manifest-side">
+        <h3 id="manifest-title">—</h3>
+        <p class="hint" id="manifest-hint">
+          Edits validate against a JSON Schema as you type. Hover any field
+          name for its description; Ctrl-Space for autocomplete.
+        </p>
+        <div id="map-style-tools" hidden>
+          <hr/>
+          <h3>Style presets</h3>
+          <p class="hint">Quickly append common Mapbox-GL style layers to <code>layers[]</code>.</p>
+          <button id="open-preset-btn" class="mini-btn">+ style preset</button>
+        </div>
+        <hr/>
+        <h3>Validation</h3>
+        <div id="manifest-errors" class="ok">no errors</div>
+        <hr/>
+        <h3>Last save</h3>
+        <pre id="manifest-save-info">—</pre>
+      </aside>
+    </section>
+
+    <!-- Style preset modal — only used in map.json manifest mode -->
+    <div id="preset-modal" hidden>
+      <form id="preset-form">
+        <h2>Add style preset</h2>
+        <p class="hint">Generates one or more Mapbox-GL style layers and appends them to <code>layers[]</code> of the current map.json.</p>
+        <label>Source
+          <select id="preset-source"></select>
+        </label>
+        <label>Preset
+          <select id="preset-kind"></select>
+        </label>
+        <p class="hint" id="preset-help"></p>
+        <div id="preset-inputs"></div>
+        <div class="preset-actions">
+          <button type="button" id="preset-cancel">Cancel</button>
+          <button type="submit">Append layer(s)</button>
+        </div>
+      </form>
+    </div>
+  </main>
+
+  <!-- Login overlay (shown when no creds in sessionStorage, or after 401) -->
+  <div id="login-overlay" hidden>
+    <form id="login-form">
+      <h2>OFM editor</h2>
+      <p class="hint">Sign in to edit. Credentials are kept in this tab only.</p>
+      <label>User<input id="login-user" type="text" autocomplete="username" autofocus required></label>
+      <label>Password<input id="login-pass" type="password" autocomplete="current-password" required></label>
+      <div class="login-error" id="login-error" hidden></div>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+
+  <script type="module" src="./editor.js"></script>
+</body>
+</html>

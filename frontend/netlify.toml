@@ -1,0 +1,23 @@
+# Netlify build configuration for the OFM editor frontend.
+#
+# This is a pure-static deployment — no build step, no framework. Netlify
+# serves index.html, editor.js, style.css, config.js as-is.
+#
+# To point the deployed frontend at a particular backend:
+#   1. Set OFM_API_URL as a Netlify build env var
+#   2. The `[build]` step below substitutes it into config.js at deploy time
+#      (envsubst), so you don't have to edit config.js by hand for each env.
+
+[build]
+  publish = "."
+  command = "envsubst < config.js.tmpl > config.js || cp config.js config.js"
+
+[build.environment]
+  OFM_API_URL = "http://localhost:8765"
+
+# SPA fallback (we currently only have one HTML file, but if we add routes
+# this keeps client-side navigation working):
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

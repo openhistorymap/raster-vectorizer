@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "http://ofm/schemas/render.json",
+  "title": "OFM render.json",
+  "description": "Array of pixel-rendering rules consumed by georender. Each rule paints a texture or scatters a point asset under a set of conditions.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["asset", "type", "weight"],
+    "additionalProperties": true,
+    "properties": {
+      "asset": {
+        "type": "string",
+        "description": "Filename of the texture or point sprite relative to the assets dir (e.g. 'Grass_D_01.jpg', 'Lantern_Metal_Brass_F1_1x1.png')."
+      },
+      "type": {
+        "type": "string",
+        "enum": ["texture", "point", "line"],
+        "description": "Rendering primitive. texture = tiled fill; point = scattered sprite; line = stroked path."
+      },
+      "weight": {
+        "type": "integer",
+        "description": "Z-order / priority within the renderer. Lower = behind. Negative numbers are conventional for backgrounds.",
+        "examples": [-100, -50, 0, 50, 95, 100]
+      },
+      "condition": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Terrain/feature class names this rule applies to. Prefix with '-' to subtract. Empty/absent = always applies."
+      },
+      "blur": {
+        "type": "integer",
+        "description": "Gaussian blur radius in pixels applied after rasterizing this rule."
+      },
+      "generate": {
+        "type": "boolean",
+        "description": "If true, scatter `asset` randomly within `generate_area` instead of placing at a feature centroid."
+      },
+      "generate_area": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Class names defining the area within which to scatter. Prefix with '-' to exclude."
+      }
+    }
+  }
+}

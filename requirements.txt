@@ -1,0 +1,25 @@
+# web service
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+itsdangerous>=2.2
+pydantic>=2.6
+jsonschema>=4.21
+
+# geometry
+shapely>=2.0
+
+# storage backends
+psycopg[binary]>=3.1
+# spatialite-python is the native binding used by azgaar-importer
+spatialite>=0.0.3
+
+# batch ops (used by /api/assist/*)
+Pillow>=10.0
+numpy>=1.24
+opencv-python-headless>=4.8
+scikit-image>=0.21
+pytesseract>=0.3.10
+
+# GeoTIFF tile rendering (pulls in rasterio with bundled GDAL)
+rio-tiler>=6.4

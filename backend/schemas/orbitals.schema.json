@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "http://ofm/schemas/orbitals.json",
+  "title": "OFM orbitals.json",
+  "description": "Array of orbital bodies for a star/system world. Used by the Coriolis-style space maps to compute positions over time and render planets, asteroids, starbases, etc.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["name"],
+    "additionalProperties": true,
+    "properties": {
+      "name":        { "type": "string", "description": "Display name (e.g. 'Portal to Mira', 'M1', 'Tyrion Belt')." },
+      "id":          { "type": "string", "description": "Stable slug for cross-references; conventionally snake_case." },
+      "class": {
+        "type": "string",
+        "description": "Body class. Conventional values: planet (terrestrial), J (Jovian), M (M-class), Y (Y-class), S (S-class), C (C-class), D (D-class), G (G-class), asteroids (belt), starbase (station). Casing matters — 'planet' and 'Planet' both occur in the wild.",
+        "examples": ["planet", "J", "M", "Y", "S", "C", "D", "G", "asteroids", "starbase"]
+      },
+      "description": { "type": "string" },
+      "markdown":    { "type": "string", "description": "Long-form markdown lore." },
+
+      "mass":         { "type": "number", "description": "Mass in kilograms (e.g. Earth = 5.972e24)." },
+      "radius":       { "type": "number", "description": "Equatorial radius in kilometres." },
+      "centralMass":  { "type": "number", "description": "Mass of the parent body in kilograms (used for Keplerian solve)." },
+      "albedo":       { "type": "number", "minimum": 0, "maximum": 1, "description": "Reflectivity 0..1." },
+      "axialTilt":    { "type": "number", "description": "Axial tilt in degrees." },
+      "sidereal":     { "type": "number", "description": "Sidereal rotation period in days." },
+      "atmosphere":   { "type": "number", "description": "Atmospheric thickness or surface pressure (Pa)." },
+
+      "semimajor":               { "type": "number", "description": "Semi-major axis in km." },
+      "semiminor":               { "type": "number", "description": "Semi-minor axis in km." },
+      "eccentricity":            { "type": "number", "minimum": 0, "description": "Orbital eccentricity (0 = circle, <1 = ellipse)." },
+      "inclination":             { "type": "number", "description": "Orbital inclination in degrees." },
+      "argumentOfPeriapsis":     { "type": "number", "description": "Argument of periapsis in degrees." },
+      "longitudeOfAscendingNode":{ "type": "number", "description": "Longitude of ascending node in degrees." },
+
+      "periapses": {
+        "type": "object",
+        "description": "Cached periapsis-passage epochs in Unix-ms; renderer interpolates between them.",
+        "properties": {
+          "last": { "type": "number" },
+          "next": { "type": "number" }
+        }
+      },
+
+      "ephemeris": {
+        "type": "object",
+        "description": "Hints for the renderer about how the body's position is computed.",
+        "properties": {
+          "nasaOrbitalCode":    { "type": "string" },
+          "nasaBarycenterCode": { "type": "string" },
+          "revolutionOrder": {
+            "type": "string",
+            "enum": ["x", "y", "z"],
+            "description": "Axis around which the body revolves in the renderer's local frame. Almost always 'y'."
+          }
+        }
+      },
+
+      "maps": {
+        "type": "array",
+        "description": "Texture maps assigned to slots on the body.",
+        "items": {
+          "type": "object",
+          "required": ["slot", "url"],
+          "properties": {
+            "slot": {
+              "type": "string",
+              "enum": ["map", "normal", "specular", "emissive", "clouds", "ring", "night"],
+              "description": "Which material slot this texture binds to. 'map' is the diffuse colour map."
+            },
+            "url": { "type": "string", "description": "Relative or absolute URL of the texture image." }
+          }
+        }
+      },
+
+      "textures": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Legacy list of additional texture URLs (use `maps` for new entries)."
+      },
+
+      "rings": {
+        "type": "object",
+        "description": "Ring-system parameters (when present)."
+      },
+
+      "satellites": {
+        "type": "array",
+        "description": "Nested orbital bodies (moons, stations) — same schema recursively.",
+        "items": { "$ref": "#/items" }
+      }
+    }
+  }
+}

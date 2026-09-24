@@ -1,0 +1,194 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "http://ofm/schemas/map.json",
+  "title": "OFM map.json (Mapbox-GL style + ofm extensions)",
+  "description": "Mapbox-GL Style Spec v8 with OFM-specific extensions under metadata.ofm. The full Mapbox spec is not validated here — only the top-level shape and the OFM extensions.",
+  "type": "object",
+  "required": ["version", "name", "sources", "layers"],
+  "additionalProperties": true,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 8,
+      "description": "Mapbox-GL Style Spec version. Must be 8."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable style name."
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "ofm": {
+          "type": "object",
+          "description": "OFM-specific metadata. Consumed by the world picker and renderer.",
+          "additionalProperties": true,
+          "properties": {
+            "parentMap": {
+              "type": ["string", "null"],
+              "description": "Slug of the parent world (e.g. realmspace for toril). null = top-level."
+            },
+            "parentLocation": {
+              "type": "array",
+              "items": { "type": "number" },
+              "minItems": 2, "maxItems": 2,
+              "description": "Coordinates of this world within its parent (e.g. star position in the galaxy)."
+            },
+            "type": {
+              "type": "string",
+              "enum": ["galaxy", "map", "starbase", "world", "system", "deck"],
+              "description": "World-shape hint. Mostly used by space worlds: 'galaxy' for system-of-stars, 'starbase' for a single station with decks, 'map' for a regular surface map."
+            },
+            "copyright":    { "type": "string" },
+            "description":  { "type": "string" },
+            "sources":      { "type": "array" },
+            "togglable": {
+              "type": "array",
+              "description": "Layer-group toggles surfaced as checkboxes in the viewer/editor. Each entry hides/shows a named set of map layers.",
+              "items": {
+                "type": "object",
+                "required": ["label", "name", "layers"],
+                "properties": {
+                  "label":  { "type": "string", "description": "Display label of the toggle." },
+                  "name":   { "type": "string", "description": "Stable slug; conventionally snake_case." },
+                  "layers": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "IDs of style layers that participate in this toggle."
+                  },
+                  "height": { "type": "number", "description": "3D extrusion height (used by the legacy globe view)." },
+                  "legend": {
+                    "type": "array",
+                    "description": "Color legend rendered next to the toggle.",
+                    "items": {
+                      "type": "array",
+                      "minItems": 2, "maxItems": 2,
+                      "prefixItems": [
+                        { "type": "string", "description": "Label" },
+                        { "type": "string", "description": "CSS color" }
+                      ]
+                    }
+                  },
+                  "sources": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "(Optional) source ids tied to this toggle group."
+                  }
+                }
+              }
+            },
+            "timed": {
+              "type": "array",
+              "description": "Sources whose features are time-bounded — viewer/editor filter by `field_from <= atDate <= field_to`.",
+              "items": {
+                "type": "object",
+                "required": ["source"],
+                "properties": {
+                  "source":     { "type": "string" },
+                  "field_from": { "type": "string", "description": "Property name holding the start date." },
+                  "field_to":   { "type": "string", "description": "Property name holding the end date." }
+                }
+              }
+            },
+            "timeline": {
+              "type": "array",
+              "description": "Two ISO-date strings [min, max] defining the world's playable time range. Drives the time-slider in the editor.",
+              "items": { "type": "string" },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "speeds": {
+              "type": "array",
+              "description": "Speed presets for movement simulation (e.g. warp factors). Editor doesn't act on these yet.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "label":      { "type": "string" },
+                  "multiplier": { "type": "number" },
+                  "unit":       { "type": "string" }
+                }
+              }
+            },
+            "distance_multiplier": {
+              "type": "number",
+              "description": "Multiplier applied when converting on-screen distance to `distance_unit`."
+            },
+            "distance_unit": {
+              "type": "string",
+              "description": "Unit string used by the distance HUD (e.g. 'ly', 'km', 'au')."
+            },
+            "relatedLayers": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Layer ids that may share `relatedField` with a clicked feature."
+            },
+            "relatedField": {
+              "type": "string",
+              "description": "Property name used to match clicked feature → related features."
+            },
+            "clickLayers": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Layer ids whose features open the related-layer side panel on click."
+            },
+            "decks": {
+              "type": "array",
+              "description": "Z-stacked sub-maps (deck plans for ships/starbases)."
+            },
+            "time": {
+              "description": "Default in-world date the map opens at (ISO string or year number)."
+            }
+          }
+        }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "description": "Mapbox sources. Keys are source ids; values are source defs with type=vector|raster|geojson|image|video|raster-dem.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["vector", "raster", "raster-dem", "geojson", "image", "video"]
+          },
+          "tiles":     { "type": "array", "items": { "type": "string" } },
+          "url":       { "type": "string" },
+          "data":      { "oneOf": [{ "type": "string" }, { "type": "object" }] },
+          "tileSize":  { "type": "integer" },
+          "minzoom":   { "type": "integer" },
+          "maxzoom":   { "type": "integer" },
+          "attribution": { "type": "string" }
+        }
+      }
+    },
+    "sprite":    { "type": "string" },
+    "glyphs":    { "type": "string" },
+    "layers": {
+      "type": "array",
+      "description": "Render layers. Each layer references a source (except type=background).",
+      "items": {
+        "type": "object",
+        "required": ["id", "type"],
+        "properties": {
+          "id":     { "type": "string" },
+          "type":   {
+            "type": "string",
+            "enum": [
+              "fill", "line", "symbol", "circle", "heatmap", "fill-extrusion",
+              "raster", "hillshade", "background"
+            ]
+          },
+          "source":       { "type": "string" },
+          "source-layer": { "type": "string" },
+          "minzoom":      { "type": "integer" },
+          "maxzoom":      { "type": "integer" },
+          "filter":       {},
+          "layout":       { "type": "object" },
+          "paint":        { "type": "object" }
+        }
+      }
+    }
+  }
+}

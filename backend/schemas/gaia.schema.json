@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "http://ofm/schemas/gaia.json",
+  "title": "OFM gaia.json",
+  "description": "Per-world AI-agent + layer config consumed by gaia_agent's MCP server and the Gaia API.",
+  "type": "object",
+  "required": ["version", "sources"],
+  "additionalProperties": true,
+  "properties": {
+    "version": {
+      "type": "string",
+      "enum": ["1.0"],
+      "description": "Schema version of this gaia.json. Only 1.0 exists today."
+    },
+    "system": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "System-prompt fragments handed to the in-world AI observer. Concatenated by gaia_agent."
+    },
+    "user": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional user-prompt fragments."
+    },
+    "image": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Prompt fragments used when the agent describes visuals."
+    },
+    "inspect_world": {
+      "type": "string",
+      "description": "One-sentence description of the world for the world picker."
+    },
+    "sources": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Layer/table names the agent should read directly. Order matters for stacking."
+    },
+    "indirect": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Layers the agent should only consult via secondary queries (e.g. politics, factions)."
+    },
+    "weather": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Weather phenomena this world supports (e.g. 'snow', 'ashfall', 'dust_storm')."
+    },
+    "terrain": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Terrain classes used by the renderer + agent (e.g. 'desert', 'forest', 'silt')."
+    },
+    "agents": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Agent table names that hold tracked NPCs/actors."
+    },
+    "inspection_presets": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Pre-canned observer personas exposed in the inspect UI (e.g. 'Wizard', 'Nord warrior')."
+    },
+    "views": { "type": "array", "items": { "type": "string" } }
+  }
+}

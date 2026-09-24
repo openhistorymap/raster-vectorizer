@@ -1,0 +1,138 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "http://ofm/schemas/timeline.json",
+  "title": "OFM timeline.json",
+  "description": "Per-world manifest. Discovered by gaia/discovery as /srv/ofm/<world>/timeline.json.",
+  "type": "object",
+  "required": ["name", "url", "size", "date", "base"],
+  "additionalProperties": true,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable world name (e.g. 'Toril', 'Planetos')."
+    },
+    "url": {
+      "type": "string",
+      "pattern": "^/[a-zA-Z0-9_\\-/]+$",
+      "description": "Public URL slug, leading slash. Conventionally /<world_dir_name>."
+    },
+    "size": {
+      "type": "number",
+      "description": "World size hint used by the renderer; 1=tiny … 5=galaxy. Most fantasy continents use 3.",
+      "default": 3,
+      "examples": [1, 2, 3, 4, 5]
+    },
+    "date": {
+      "oneOf": [{ "type": "number" }, { "type": "string" }],
+      "description": "In-world year (or ISO date string) at which to display."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["postgis", "spatialite", "geojson", "local", "files", "orbitals"],
+      "description": "Storage backend. postgis = shared PG host, spatialite = local .db, geojson = files under raw/geojson/, orbitals = procedurally-generated space."
+    },
+    "visible": {
+      "type": "boolean",
+      "description": "Whether this world appears in the world picker. Defaults to true."
+    },
+    "modifiable": {
+      "type": "boolean",
+      "description": "Whether the editor should permit writes."
+    },
+    "base": {
+      "type": "object",
+      "required": ["zoom", "lat", "lng"],
+      "description": "Default map center + zoom on first load.",
+      "properties": {
+        "zoom":  { "type": "number" },
+        "lat":   { "type": "number" },
+        "lng":   { "type": "number" }
+      }
+    },
+    "connection": {
+      "type": "object",
+      "description": "Storage connection details. Only `db` is required for the standard PG/SpatiaLite setup.",
+      "properties": {
+        "db":       { "type": "string" },
+        "host":     { "type": "string" },
+        "port":     { "oneOf": [{ "type": "integer" }, { "type": "string" }] },
+        "user":     { "type": "string" },
+        "password": { "type": "string" }
+      }
+    },
+    "copyright":   { "type": "string" },
+    "description": { "type": "string" },
+    "color": {
+      "type": "string",
+      "description": "Named color/palette key consumed by frontend (e.g. 'blue-bell')."
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Free-form tags used by the world picker."
+    },
+    "sources": {
+      "type": "array",
+      "description": "Static-data sources for this world. Mostly used by the rendering pipeline.",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name":        { "type": "string" },
+          "label":       { "type": "string" },
+          "attribution": { "type": "string" },
+          "copyright":   { "type": "string" },
+          "basepath":    { "type": "string" }
+        }
+      }
+    },
+    "wikis": {
+      "type": "object",
+      "description": "Map of wiki-slug → wiki metadata; consumed by gaia_agent and gaia for lore lookups.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["slug", "name", "base"],
+        "properties": {
+          "slug":        { "type": "string" },
+          "name":        { "type": "string" },
+          "world":       { "type": "string" },
+          "description": { "type": "string" },
+          "type":        { "type": "string", "enum": ["wiki", "blog", "doc"] },
+          "base":        { "type": "string", "format": "uri" }
+        }
+      }
+    },
+    "search": {
+      "type": "array",
+      "description": "Search index hints — which layers/fields the global search should look in.",
+      "items": {
+        "type": "object",
+        "required": ["layer", "field"],
+        "properties": {
+          "layer": { "type": "string" },
+          "field": { "type": "string" }
+        }
+      }
+    },
+    "relateds":      { "type": "array", "items": { "type": "string" } },
+    "relatedLayers": { "type": "array", "items": { "type": "string" } },
+    "tracks": {
+      "type": "object",
+      "description": "Live-tracking table for MQTT-driven moving entities.",
+      "properties": {
+        "table": { "type": "string" },
+        "col":   { "type": "string" }
+      }
+    },
+    "events": {
+      "type": "string",
+      "description": "Name of the table that holds in-world events."
+    },
+    "star":         { "type": "string", "description": "Parent star name for orbital worlds." },
+    "starClass":    { "type": "string", "description": "Spectral class (O/B/A/F/G/K/M)." },
+    "orbitalMode":  { "type": "string" },
+    "from_date":    { "type": "string" },
+    "owner":        { "type": "string" },
+    "fork_of":      { "type": "string" }
+  }
+}

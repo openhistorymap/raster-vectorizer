@@ -1,0 +1,51 @@
+# OFM raster-vectorizer editor backend.
+# Frontend deploys separately to Netlify; see ./frontend/README.md.
+#
+# Usage:
+#   docker compose up --build               # start editor backend on :8765
+#   docker compose run --rm --build test    # run the pytest suite
+services:
+  editor:
+    build:
+      context: .
+      target: base
+    image: ofm/raster-vectorizer-editor:latest
+    container_name: ofm-editor
+    restart: unless-stopped
+    ports:
+      # Public IP — the editor is exposed to the internet on this address.
+      # Auth is mandatory; put TLS-terminating nginx in front for real security.
+      - "51.15.160.236:8765:8765"
+    environment:
+      OFM_ROOT: /ofm
+      # Basic-auth credentials and the PostGIS password come from .env
+      # (git-ignored; copy .env.example). Compose refuses to start without them.
+      OFM_EDITOR_USER: ${OFM_EDITOR_USER:-ofm}
+      OFM_EDITOR_PASSWORD: ${OFM_EDITOR_PASSWORD:?set OFM_EDITOR_PASSWORD in .env (see .env.example)}
+      # Only the SPA origin is allowed cross-origin access.
+      OFM_CORS_ORIGINS: ${OFM_CORS_ORIGINS:-http://51.15.160.236:8766}
+      OFM_PG_HOST: ${OFM_PG_HOST:-51.15.160.236}
+      OFM_PG_PORT: ${OFM_PG_PORT:-45432}
+      OFM_PG_USER: ${OFM_PG_USER:-admin}
+      OFM_PG_PASSWORD: ${OFM_PG_PASSWORD:?set OFM_PG_PASSWORD in .env (see .env.example)}
+    volumes:
+      - /srv/ofm:/ofm
+
+  # Local-dev static server for the SPA. In production this is deployed to
+  # Netlify; this service exists so `docker compose up` brings up the whole
+  # stack on the host with one command.
+  frontend:
+    image: nginx:alpine
+    container_name: ofm-editor-frontend
+    restart: unless-stopped
+    ports:
+      - "51.15.160.236:8766:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+
+  test:
+    build:
+      context: .
+      target: test
+    image: ofm/raster-vectorizer-editor:test
+    profiles: ["test"]
