@@ -107,6 +107,11 @@ the API refuses every request (503) unless `OFM_EDITOR_OPEN=1`.
 | `/api/worlds/{slug}/layers/{layer}`         | PUT    | save layer (non-destructive, see below); returns what changed |
 | `/api/worlds/{slug}/layers/{layer}`         | DELETE | drop the layer |
 | `/api/worlds/{slug}/sources`                | GET/PUT | the world's source registry (Cited GeoJSON `sources`), validated |
+| `/api/worlds/{slug}/scans`                  | GET/POST | list / upload scanned maps (optionally registering the file under a source, with checksum) |
+| `/api/worlds/{slug}/scans/{name}/image?max=N` | GET  | PNG preview; `X-Scale` header converts preview px to full-resolution px |
+| `/api/worlds/{slug}/scans/{name}/georef/fit` | POST  | dry run: fit control points → accuracy, per-point errors, checks, footprint |
+| `/api/worlds/{slug}/scans/{name}/georef`    | GET/PUT | the saved Georeference Annotation / fit and save (422 if a check fails) |
+| `/api/worlds/{slug}/scans/{name}/warp`      | POST   | warp with the saved georeference into `cogs/<name>.tif` (a basemap) |
 | `/api/worlds/{slug}/layers/{layer}/cited-geojson` | GET | the layer as a validated Cited GeoJSON document (422 + reasons if it cannot be) |
 | `/api/worlds/{slug}/layers/{layer}/cited-geojson` | PUT | import a Cited GeoJSON document: merge its sources, save its features |
 | `/api/worlds/{slug}/rasters`                                | GET    | list raster sources for this world (pyramids + GeoTIFFs) with zoom/bounds/extension |
@@ -150,6 +155,30 @@ Features can cite their sources in the
   returning it. **Import** merges a document's sources into the registry
   (existing entries win; differences are reported) and saves its features,
   keeping their ids.
+
+## Georeferencing scans
+
+Scanned maps are uploaded to `<world>/raw/scans/`. Control points (pixel ↔
+lon/lat) are saved as an IIIF Georeference Annotation — the
+[Allmaps](https://allmaps.org) format, and what Cited GeoJSON's `georeferences`
+carries — in `<world>/raw/georef/<name>.json` (`backend/georef.py`).
+
+- **Transformations:** polynomial of order 1–3 (least squares) or thin-plate
+  spline, fitted like Allmaps from pixels to Web Mercator metres, with a
+  separate backward model for warping.
+- **Accuracy, honestly:** per-point residuals and a leave-one-out error (each
+  point predicted by a model fitted without it), both in metres on the ground.
+  Thin-plate splines interpolate exactly, so for them only the leave-one-out
+  figure is published. The accuracy is stored in the annotation and travels
+  into Cited GeoJSON exports.
+- **Checks:** too few or collinear points, an image that maps outside valid
+  coordinates, a size far from the declared `expectedWidthM` (the error that
+  left starfleet-defiant's decks ~1 cm long), images a few centimetres across,
+  a transformation that folds over itself, over-fitting, and whether the
+  world's default view falls inside the image. Error-level checks block saving.
+- **Warping** uses the same backward model as the reported accuracy and writes
+  an EPSG:3857 tiled GeoTIFF with overviews to `<world>/cogs/<name>.tif`, which
+  the raster discovery serves as a basemap.
 
 ## Saving: non-destructive, with history
 

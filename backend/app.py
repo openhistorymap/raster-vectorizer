@@ -19,7 +19,7 @@ from typing import Any
 
 import json as _json
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -52,6 +52,7 @@ class UnicodeJSONResponse(JSONResponse):
         return text.encode("utf-8")
 
 from . import cited as cited_mod
+from . import georef as georef_mod
 from . import layer_schemas as layer_schemas_mod
 from . import manifest as manifest_mod
 from . import raster as raster_mod
@@ -238,6 +239,151 @@ def import_cited(slug: str, layer: str, body: dict[str, Any],
         raise HTTPException(422, {"errors": e.errors})
     summary = _call_or_503(wdir, "save_layer", layer, fc, editor=user)
     return {**summary, "world": slug, "sources": report}
+
+
+# --- scans and georeferencing ----------------------------------------------
+
+def _scan_or_404(wdir: Path, name: str) -> Path:
+    try:
+        return georef_mod.scan_path(wdir, name)
+    except georef_mod.GeorefError as e:
+        raise HTTPException(400, str(e))
+    except FileNotFoundError:
+        raise HTTPException(404, f"unknown scan: {name}")
+
+
+@app.get("/api/worlds/{slug}/scans", dependencies=[Depends(require_user)])
+def get_scans(slug: str) -> list[dict[str, Any]]:
+    return georef_mod.list_scans(_world_or_404(slug))
+
+
+@app.post("/api/worlds/{slug}/scans", dependencies=[Depends(require_user)])
+async def upload_scan(slug: str, file: UploadFile = File(...), name: str | None = Form(None),
+                      source: str | None = Form(None)) -> dict[str, Any]:
+    """Upload a scanned map. With `source` (an IRI in the world's registry) the scan is also
+    recorded as a file of that source, with its checksum, so citations can point into it."""
+    wdir = _world_or_404(slug)
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in georef_mod.IMAGE_EXTS:
+        raise HTTPException(400, f"unsupported image type {ext!r}; use {', '.join(georef_mod.IMAGE_EXTS)}")
+    stem = name or Path(file.filename).stem
+    if not georef_mod.SAFE_NAME.match(stem):
+        raise HTTPException(400, f"invalid scan name {stem!r}")
+    registry = cited_mod.load_sources(wdir)
+    if source and source not in registry:
+        raise HTTPException(422, f"source {source} is not in the world's source registry")
+    d = georef_mod.scans_dir(wdir)
+    d.mkdir(parents=True, exist_ok=True)
+    if any((d / f"{stem}{e}").exists() for e in georef_mod.IMAGE_EXTS):
+        raise HTTPException(409, f"a scan named {stem!r} already exists")
+    path = d / f"{stem}{ext}"
+    tmp = path.with_suffix(ext + ".part")
+    with tmp.open("wb") as fh:
+        while chunk := await file.read(1 << 20):
+            fh.write(chunk)
+    try:
+        georef_mod.image_size(tmp)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, "the upload is not a readable image")
+    tmp.replace(path)
+    info = georef_mod.scan_info(wdir, path)
+    if source:
+        entry = {"id": stem, "checksum": georef_mod.sha256(path),
+                 "mediaType": file.content_type or "application/octet-stream", "label": file.filename}
+        files = [f for f in registry[source].get("files", []) if f.get("id") != stem] + [entry]
+        registry[source] = {**registry[source], "files": files}
+        cited_mod.save_sources(wdir, registry)
+        info["source"] = source
+    return info
+
+
+@app.get("/api/worlds/{slug}/scans/{name}/image", dependencies=[Depends(require_user)])
+def get_scan_image(slug: str, name: str, size: int = Query(2048, alias="max", ge=64, le=8192)) -> Response:
+    """The scan as PNG, downscaled so its longer side is at most `max` px. The response header
+    X-Scale is original px per returned px, to convert clicks back to full-resolution pixels."""
+    from io import BytesIO
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = None
+    path = _scan_or_404(_world_or_404(slug), name)
+    with Image.open(path) as im:
+        w, h = im.size
+        scale = max(w, h) / size if max(w, h) > size else 1.0
+        im = im.convert("RGBA")
+        if scale > 1:
+            im = im.resize((round(w / scale), round(h / scale)), Image.LANCZOS)
+        buf = BytesIO()
+        im.save(buf, "PNG")
+    return Response(buf.getvalue(), media_type="image/png",
+                    headers={"X-Scale": f"{scale:.6f}", "X-Original-Size": f"{w}x{h}",
+                             "Access-Control-Expose-Headers": "X-Scale, X-Original-Size"})
+
+
+def _fit_request(wdir: Path, path: Path, body: dict[str, Any]) -> tuple[dict, list, int, int, str, float | None]:
+    method = body.get("transformation", "polynomial1")
+    expected = body.get("expectedWidthM")
+    w, h = georef_mod.image_size(path)
+    try:
+        result = georef_mod.fit(body.get("gcps", []), method)
+    except georef_mod.GeorefError as e:
+        raise HTTPException(422, str(e))
+    check_list = georef_mod.checks(result, w, h, _timeline(wdir), float(expected) if expected else None)
+    return result, check_list, w, h, method, float(expected) if expected else None
+
+
+def _fit_response(result: dict, check_list: list, w: int, h: int) -> dict[str, Any]:
+    ring = georef_mod.footprint(result["forward"], w, h)
+    return {"accuracy": result["accuracy"], "points": result["points"], "checks": check_list,
+            "footprint": {"type": "Polygon", "coordinates": [ring.round(8).tolist() + [ring[0].round(8).tolist()]]}}
+
+
+@app.post("/api/worlds/{slug}/scans/{name}/georef/fit", dependencies=[Depends(require_user)])
+def fit_georef(slug: str, name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Dry run: fit control points, return accuracy, per-point errors, checks and footprint."""
+    wdir = _world_or_404(slug)
+    result, check_list, w, h, *_ = _fit_request(wdir, _scan_or_404(wdir, name), body)
+    return _fit_response(result, check_list, w, h)
+
+
+@app.get("/api/worlds/{slug}/scans/{name}/georef", dependencies=[Depends(require_user)])
+def get_georef(slug: str, name: str) -> dict[str, Any]:
+    wdir = _world_or_404(slug)
+    _scan_or_404(wdir, name)
+    gp = georef_mod.georef_path(wdir, name)
+    if not gp.exists():
+        raise HTTPException(404, f"scan {name} has no georeference yet")
+    return _json.loads(gp.read_text(encoding="utf-8"))
+
+
+@app.put("/api/worlds/{slug}/scans/{name}/georef", dependencies=[Depends(require_user)])
+def put_georef(slug: str, name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Fit and save the georeference annotation. Refused (422) when a check fails at error level."""
+    wdir = _world_or_404(slug)
+    result, check_list, w, h, method, expected = _fit_request(wdir, _scan_or_404(wdir, name), body)
+    errors = [c["message"] for c in check_list if c["level"] == "error"]
+    if errors:
+        raise HTTPException(422, {"errors": errors, "checks": check_list})
+    ann = georef_mod.annotation(name, w, h, method, result, check_list, expected)
+    gp = georef_mod.georef_path(wdir, name)
+    gp.parent.mkdir(parents=True, exist_ok=True)
+    tmp = gp.with_suffix(".json.tmp")
+    tmp.write_text(_json.dumps(ann, indent=2), encoding="utf-8")
+    tmp.replace(gp)
+    return {"annotation": ann, **_fit_response(result, check_list, w, h)}
+
+
+@app.post("/api/worlds/{slug}/scans/{name}/warp", dependencies=[Depends(require_user)])
+def warp_scan(slug: str, name: str) -> dict[str, Any]:
+    """Warp the scan with its saved georeference into cogs/<name>.tif (a basemap source)."""
+    wdir = _world_or_404(slug)
+    path = _scan_or_404(wdir, name)
+    gp = georef_mod.georef_path(wdir, name)
+    if not gp.exists():
+        raise HTTPException(409, "save a georeference first")
+    ann = _json.loads(gp.read_text(encoding="utf-8"))
+    result = georef_mod.fit(georef_mod.gcps_of(ann), georef_mod.method_of(ann))
+    out = georef_mod.warp(path, wdir / "cogs" / f"{name}.tif", result["forward"], result["backward"])
+    return {**out, "accuracy": ann.get("accuracy"), "raster_source": name}
 
 
 # --- per-layer JSON Schema -------------------------------------------------
