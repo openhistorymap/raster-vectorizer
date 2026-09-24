@@ -26,7 +26,7 @@ def test_factory_picks_geojson_when_mode_geojson(ofm_root: Path):
 
 def test_save_then_load_roundtrips(ofm_root: Path):
     a = GeoJSONFileAdapter(ofm_root / "fakeworld")
-    assert a.save_layer("parks", _fc([_poly("Central"), _poly("North")])) == 2
+    assert a.save_layer("parks", _fc([_poly("Central"), _poly("North")]))["saved"] == 2
     loaded = a.load_layer("parks")
     assert loaded["type"] == "FeatureCollection"
     assert len(loaded["features"]) == 2

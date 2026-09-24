@@ -1,4 +1,9 @@
-"""SpatiaLite storage adapter — column convention: `the_geom`, SRID 4326."""
+"""SpatiaLite storage adapter — column convention: `the_geom`, SRID 4326.
+
+Saves are non-destructive (see diff.py): rows are matched by a stable `fid` column, only changed
+rows are written, every attribute column is kept, and each change is recorded in `_ofm_history`,
+all in one transaction.
+"""
 from __future__ import annotations
 
 import json
@@ -11,8 +16,11 @@ try:
 except ImportError:  # pragma: no cover
     spatialite = None
 
-from shapely.geometry import shape, mapping
-from shapely import wkt as shapely_wkt
+import shapely
+from shapely.geometry import shape
+
+from .diff import (FID, HISTORY_TABLE, ROW_PREFIX, StoredRow, coerce_geometry, geometry_from_wkt,
+                   history_record, new_fid, plan_save)
 
 SAFE_TABLE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
@@ -25,6 +33,21 @@ GEOM_TYPE_MAP = {
     "Polygon": "POLYGON",
     "MultiPolygon": "MULTIPOLYGON",
 }
+
+
+# SpatiaLite geometry_columns.geometry_type codes (Z/M variants add 1000/2000/3000).
+GEOM_CODES = {0: "GEOMETRY", 1: "POINT", 2: "LINESTRING", 3: "POLYGON", 4: "MULTIPOINT",
+              5: "MULTILINESTRING", 6: "MULTIPOLYGON", 7: "GEOMETRYCOLLECTION"}
+
+
+def q(name: str) -> str:
+    """Quote a column name read from the database."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def wkt2d(geometry: dict) -> str:
+    """WKT without Z/M: layers are XY, and some sources pad coordinates with a dummy Z."""
+    return shapely.force_2d(shape(geometry)).wkt
 
 
 class SpatiaLiteAdapter:
@@ -73,6 +96,7 @@ class SpatiaLiteAdapter:
         self.conn.execute(
             f"CREATE TABLE {layer} ("
             "id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,"
+            f"{FID} TEXT NOT NULL UNIQUE,"
             "name TEXT NULL,"
             "class TEXT NULL,"
             "properties TEXT NULL)"
@@ -80,7 +104,6 @@ class SpatiaLiteAdapter:
         self.conn.execute(
             f"SELECT AddGeometryColumn('{layer}', 'the_geom', 4326, '{geom_type}', 'XY', 1)"
         )
-        self.conn.commit()
 
     def list_layers(self) -> list[dict[str, Any]]:
         cur = self.conn.execute(
@@ -92,12 +115,15 @@ class SpatiaLiteAdapter:
             rows.append({"name": tbl, "count": cnt, "geometry_type": str(gtype)})
         return rows
 
-    def _columns(self, table: str) -> list[str]:
-        """Return ordered list of column names for the given table."""
+    def _table_info(self, table: str) -> list[tuple[str, int]]:
+        """[(column name, pk position), ...] in column order."""
         if not SAFE_TABLE.match(table):
             raise ValueError(f"unsafe table name: {table!r}")
-        cur = self.conn.execute(f"PRAGMA table_info({table})")
-        return [r[1] for r in cur.fetchall()]
+        return [(r[1], r[5]) for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()]
+
+    def _columns(self, table: str) -> list[str]:
+        """Return ordered list of column names for the given table."""
+        return [name for name, _ in self._table_info(table)]
 
     def _geom_column(self, table: str) -> str | None:
         cur = self.conn.execute(
@@ -107,77 +133,160 @@ class SpatiaLiteAdapter:
         row = cur.fetchone()
         return row[0] if row else None
 
+    def _geom_type(self, table: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT geometry_type FROM geometry_columns WHERE f_table_name = ?", (table,)).fetchone()
+        if not row:
+            return None
+        code = int(row[0]) % 1000  # 1000s encode Z/M variants
+        return GEOM_CODES.get(code)
+
+    def _layout(self, table: str) -> tuple[str, str | None, list[str], bool]:
+        """(geometry column, primary-key column or None, attribute columns, has properties column)."""
+        info = self._table_info(table)
+        names = [n for n, _ in info]
+        geom_col = self._geom_column(table) or "the_geom"
+        pks = [n for n, pos in sorted(info, key=lambda x: x[1]) if pos]
+        pk = pks[0] if len(pks) == 1 else None
+        attrs = [n for n in names if n not in (geom_col, pk, FID, "properties")]
+        return geom_col, pk, attrs, "properties" in names
+
+    def _read_rows(self, table: str) -> list[dict[str, Any]]:
+        geom_col, pk, _, _ = self._layout(table)
+        other = [n for n in self._columns(table) if n != geom_col]
+        quoted = ", ".join(q(n) for n in other)
+        cur = self.conn.execute(
+            f"SELECT {quoted}, AsText({q(geom_col)}), rowid FROM {table}")
+        rows = []
+        for r in cur.fetchall():
+            d = dict(zip(other + ["_ofm_wkt", "_ofm_rowid"], r))
+            rows.append(d)
+        return rows
+
+    @staticmethod
+    def _extras(value: Any) -> dict[str, Any]:
+        if isinstance(value, str) and value:
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except ValueError:
+                return {}
+        return {}
+
     def load_layer(self, layer: str) -> dict[str, Any]:
         if not SAFE_TABLE.match(layer):
             raise ValueError(f"unsafe table name: {layer!r}")
-        cols = self._columns(layer)
-        if not cols:
+        if not self._columns(layer):
             raise RuntimeError(f"table not found or empty schema: {layer}")
-        geom_col = self._geom_column(layer) or "the_geom"
-        other = [c for c in cols if c != geom_col]
-        quoted = ", ".join(f'"{c}"' for c in other)
-        sql = f'SELECT {quoted}, AsText("{geom_col}") FROM {layer}'
-        cur = self.conn.execute(sql)
+        _, pk, attrs, _ = self._layout(layer)
         features = []
-        for row in cur.fetchall():
-            row_dict = dict(zip(other + ["_ofm_wkt"], row))
-            wkt = row_dict.pop("_ofm_wkt")
-            geom = shapely_wkt.loads(wkt) if wkt else None
-            fid = row_dict.pop("id", None)
-            props_json = row_dict.pop("properties", None)
-            props = json.loads(props_json) if isinstance(props_json, str) and props_json else {}
-            for k, v in row_dict.items():
-                if v is None:
-                    continue
-                props.setdefault(k, v)
-            features.append(
-                {
-                    "type": "Feature",
-                    "id": fid,
-                    "geometry": mapping(geom) if geom else None,
-                    "properties": props,
-                }
-            )
+        for r in self._read_rows(layer):
+            props = self._extras(r.get("properties"))
+            for k in attrs:
+                if r.get(k) is not None:
+                    props.setdefault(k, r[k])
+            fid = r.get(FID)
+            key = fid if fid is not None else f"{ROW_PREFIX}{r[pk] if pk else r['_ofm_rowid']}"
+            features.append({
+                "type": "Feature",
+                "id": str(key),
+                "geometry": geometry_from_wkt(r["_ofm_wkt"]),
+                "properties": props,
+            })
         return {"type": "FeatureCollection", "features": features}
 
-    def save_layer(self, layer: str, feature_collection: dict[str, Any]) -> int:
+    def _ensure_fid(self, layer: str) -> None:
+        """Give an older table a stable, unique fid per row."""
+        if FID not in self._columns(layer):
+            self.conn.execute(f"ALTER TABLE {layer} ADD COLUMN {FID} TEXT")
+        missing = self.conn.execute(f"SELECT rowid FROM {layer} WHERE {FID} IS NULL").fetchall()
+        for (rowid,) in missing:
+            self.conn.execute(f"UPDATE {layer} SET {FID} = ? WHERE rowid = ?", (new_fid(), rowid))
+        self.conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {layer}_{FID}_idx ON {layer} ({FID})")
+
+    def _ensure_history(self) -> None:
+        self.conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {HISTORY_TABLE} ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "layer TEXT NOT NULL,"
+            "fid TEXT NOT NULL,"
+            "op TEXT NOT NULL CHECK (op IN ('insert', 'update', 'delete')),"
+            "before TEXT,"
+            "after TEXT,"
+            "editor TEXT,"
+            "at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))"
+        )
+        self.conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {HISTORY_TABLE}_feature_idx ON {HISTORY_TABLE} (layer, fid)")
+
+    @staticmethod
+    def _value(value: Any) -> Any:
+        return json.dumps(value) if isinstance(value, (dict, list)) else value
+
+    def save_layer(self, layer: str, feature_collection: dict[str, Any],
+                   editor: str | None = None) -> dict[str, Any]:
+        if not SAFE_TABLE.match(layer):
+            raise ValueError(f"unsafe table name: {layer!r}")
         feats = feature_collection.get("features", [])
-        if not feats:
-            try:
-                self.conn.execute(f"DELETE FROM {layer}")
-                self.conn.commit()
-            except Exception:
-                pass
-            return 0
-        first = feats[0]
-        gtype = (first.get("geometry") or {}).get("type", "POLYGON")
-        sl_type = GEOM_TYPE_MAP.get(gtype, "GEOMETRY")
-        # Use existing table shape if present; otherwise create the standard one.
-        existing = self._columns(layer)
-        if not existing:
-            self._ensure_table(layer, sl_type)
-            existing = self._columns(layer)
-        geom_col = self._geom_column(layer) or "the_geom"
-        col_set = set(existing)
-        writable_scalars = [c for c in ("name", "class", "properties") if c in col_set]
-        self.conn.execute(f"DELETE FROM {layer}")
-        for f in feats:
-            geom = f.get("geometry")
-            if not geom:
-                continue
-            wkt_text = shape(geom).wkt
-            props = f.get("properties") or {}
-            values = []
-            for sc in writable_scalars:
-                values.append(json.dumps(props) if sc == "properties" else props.get(sc))
-            col_list = ", ".join(f'"{c}"' for c in writable_scalars + [geom_col])
-            placeholders = ", ".join(["?"] * len(writable_scalars) + ["GeomFromText(?, 4326)"])
-            self.conn.execute(
-                f"INSERT INTO {layer} ({col_list}) VALUES ({placeholders})",
-                (*values, wkt_text),
-            )
-        self.conn.commit()
-        return len(feats)
+        try:
+            if not self._columns(layer):
+                if not feats:
+                    return {"layer": layer, "saved": 0, "inserted": 0, "updated": 0,
+                            "deleted": 0, "unchanged": 0, "unstored_attributes": []}
+                first = (feats[0].get("geometry") or {}).get("type", "Polygon")
+                self._ensure_table(layer, GEOM_TYPE_MAP.get(first, "GEOMETRY"))
+            self._ensure_fid(layer)
+            self._ensure_history()
+            geom_col, pk, attrs, has_props = self._layout(layer)
+            gtype = self._geom_type(layer)
+
+            rows = self._read_rows(layer)
+            alias = {f"{ROW_PREFIX}{r[pk] if pk else r['_ofm_rowid']}": r[FID] for r in rows}
+            stored = [StoredRow(key=str(r[FID]), columns={a: r.get(a) for a in attrs},
+                                extras=self._extras(r.get("properties")) if has_props else {},
+                                geometry=geometry_from_wkt(r["_ofm_wkt"])) for r in rows]
+            incoming = [{**f, "id": alias.get(str(f.get("id")), f.get("id"))} for f in feats]
+            plan = plan_save(stored, incoming, attrs, has_props)
+
+            for ch in plan.deletes:
+                self.conn.execute(f"DELETE FROM {layer} WHERE {FID} = ?", (ch.key,))
+            for ch in plan.inserts:
+                names = list(ch.columns) + (["properties"] if ch.extras is not None else [])
+                values = [self._value(ch.columns[n]) for n in ch.columns]
+                if ch.extras is not None:
+                    values.append(json.dumps(ch.extras))
+                col_list = ", ".join(q(n) for n in [FID, *names, geom_col])
+                ph = ", ".join(["?"] * (len(names) + 1) + ["GeomFromText(?, 4326)"])
+                self.conn.execute(f"INSERT INTO {layer} ({col_list}) VALUES ({ph})",
+                                  (ch.fid, *values, wkt2d(coerce_geometry(ch.geometry, gtype))))
+            for ch in plan.updates:
+                sets, values = [], []
+                for n, v in ch.columns.items():
+                    sets.append(f"{q(n)} = ?")
+                    values.append(self._value(v))
+                if ch.extras is not None:
+                    sets.append("properties = ?")
+                    values.append(json.dumps(ch.extras))
+                if ch.geometry is not None:
+                    sets.append(f"{q(geom_col)} = GeomFromText(?, 4326)")
+                    values.append(wkt2d(coerce_geometry(ch.geometry, gtype)))
+                self.conn.execute(f"UPDATE {layer} SET {', '.join(sets)} WHERE {FID} = ?",
+                                  (*values, ch.key))
+            for op, changes in (("insert", plan.inserts), ("update", plan.updates),
+                                ("delete", plan.deletes)):
+                for ch in changes:
+                    rec = history_record(layer, ch, op, editor)
+                    self.conn.execute(
+                        f"INSERT INTO {HISTORY_TABLE} (layer, fid, op, before, after, editor) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (layer, rec["fid"], op,
+                         json.dumps(rec["before"], default=str) if rec["before"] else None,
+                         json.dumps(rec["after"], default=str) if rec["after"] else None, editor))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return plan.summary(layer)
 
     def delete_layer(self, layer: str) -> None:
         if not SAFE_TABLE.match(layer):

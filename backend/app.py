@@ -6,7 +6,7 @@ Routes (all under /api):
   GET    /worlds/{slug}/style                 the world's map.json (Mapbox-GL style)
   GET    /worlds/{slug}/layers                list layers known to the storage backend
   GET    /worlds/{slug}/layers/{layer}        load a layer as FeatureCollection
-  PUT    /worlds/{slug}/layers/{layer}        replace layer contents (FeatureCollection)
+  PUT    /worlds/{slug}/layers/{layer}        save a layer (non-destructive diff, see storage/diff.py)
   DELETE /worlds/{slug}/layers/{layer}        drop the layer
   GET    /worlds/{slug}/tiles/{z}/{x}/{y}.jpg proxy a local raster tile
   GET    /health                              liveness
@@ -57,6 +57,7 @@ from . import raster as raster_mod
 from . import worlds as world_mod
 from .auth import require_user
 from .storage import for_world
+from .storage.diff import SaveRejected
 
 
 def _adapter_or_503(wdir):
@@ -82,6 +83,8 @@ def _call_or_503(wdir, method_name: str, *args, **kwargs):
         return getattr(adapter, method_name)(*args, **kwargs)
     except HTTPException:
         raise
+    except SaveRejected as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=503,
@@ -162,16 +165,20 @@ def get_layer(slug: str, layer: str) -> Response:
     return UnicodeJSONResponse(content=fc)
 
 
-@app.put("/api/worlds/{slug}/layers/{layer}", dependencies=[Depends(require_user)])
-def put_layer(slug: str, layer: str, body: dict[str, Any]) -> dict[str, Any]:
+@app.put("/api/worlds/{slug}/layers/{layer}")
+def put_layer(slug: str, layer: str, body: dict[str, Any],
+              user: str = Depends(require_user)) -> dict[str, Any]:
+    """Save a layer. Features are matched by id: changed ones are updated, new ones inserted,
+    missing ones deleted; every stored column is kept. Returns what changed, including any
+    attributes the layer has no place for (`unstored_attributes`)."""
     try:
         wdir = world_mod.world_dir(slug)
     except FileNotFoundError:
         raise HTTPException(404, f"unknown world: {slug}")
     if body.get("type") != "FeatureCollection":
         raise HTTPException(400, "body must be a GeoJSON FeatureCollection")
-    count = _call_or_503(wdir, "save_layer", layer, body)
-    return {"saved": count, "layer": layer, "world": slug}
+    summary = _call_or_503(wdir, "save_layer", layer, body, editor=user)
+    return {**summary, "world": slug}
 
 
 # --- per-layer JSON Schema -------------------------------------------------

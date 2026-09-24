@@ -49,3 +49,27 @@ services:
       target: test
     image: ofm/raster-vectorizer-editor:test
     profiles: ["test"]
+    # Throwaway PostGIS for the non-destructive-save tests (same major version as production).
+    environment:
+      OFM_TEST_PG_HOST: testdb
+      OFM_TEST_PG_PORT: "5432"
+      OFM_TEST_PG_USER: test
+      OFM_TEST_PG_PASSWORD: test
+      OFM_TEST_PG_DB: test
+    depends_on:
+      testdb:
+        condition: service_healthy
+
+  testdb:
+    image: postgis/postgis:12-3.4
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d test"]
+      interval: 2s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data

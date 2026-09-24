@@ -921,6 +921,7 @@ function loadFeaturesIntoState(fc) {
     .map((f) => ({
       type: "Feature",
       id: f.id != null ? String(f.id) : `feat_${nextLocalId++}`,
+      _multi: f._multi || false,
       geometry: f.geometry,
       properties: { ...(f.properties || {}) },
     }));
@@ -1094,16 +1095,36 @@ function allVertices(geom) {
   }
 }
 
+// Multi geometries are edited part by part. Every part keeps the feature's id
+// and is marked `_multi`, so joinParts() can put the feature back together on
+// save instead of turning each part into a separate feature.
 function flattenMulti(f) {
   const g = f.geometry;
   if (!g) return [f];
   if (g.type === "MultiPoint")
-    return g.coordinates.map((c) => ({ ...f, geometry: { type: "Point", coordinates: c } }));
+    return g.coordinates.map((c) => ({ ...f, _multi: true, geometry: { type: "Point", coordinates: c } }));
   if (g.type === "MultiLineString")
-    return g.coordinates.map((c) => ({ ...f, geometry: { type: "LineString", coordinates: c } }));
+    return g.coordinates.map((c) => ({ ...f, _multi: true, geometry: { type: "LineString", coordinates: c } }));
   if (g.type === "MultiPolygon")
-    return g.coordinates.map((c) => ({ ...f, geometry: { type: "Polygon", coordinates: c } }));
+    return g.coordinates.map((c) => ({ ...f, _multi: true, geometry: { type: "Polygon", coordinates: c } }));
   return [f];
+}
+
+// Inverse of flattenMulti: one feature per id, parts rejoined as a Multi geometry.
+function joinParts(features) {
+  const groups = new Map();
+  for (const f of features) {
+    if (!groups.has(f.id)) groups.set(f.id, []);
+    groups.get(f.id).push(f);
+  }
+  return [...groups.values()].map((parts) => {
+    const first = parts[0];
+    if (parts.length === 1 && !first._multi) return first;
+    return {
+      ...first,
+      geometry: { type: `Multi${first.geometry.type}`, coordinates: parts.map((p) => p.geometry.coordinates) },
+    };
+  });
 }
 
 function geometryTypeForLayer() {
@@ -1777,10 +1798,12 @@ $save.addEventListener("click", async () => {
     setStatus("saving…");
     try {
       // Build the FeatureCollection from our own state. Loaded features get
-      // their pending edits merged; the synthetic id we assigned at load is
-      // dropped (server has its own ids).
-      const features = loadedFeatures.map((f) => ({
+      // their pending edits merged. Ids go back to the server, which matches
+      // them against the stored features: changed ones are updated, missing
+      // ones deleted, and new ones (id "new_N") inserted with a permanent id.
+      const features = joinParts(loadedFeatures).map((f) => ({
         type: "Feature",
+        id: f.id,
         geometry: f.geometry,
         properties: {
           ...(f.properties || {}),
@@ -1807,8 +1830,17 @@ $save.addEventListener("click", async () => {
         body: JSON.stringify(fc),
       });
       setDirty(false);
-      setStatus(`saved ${r.saved} features to ${r.layer}`, "ok");
-      $info.textContent = JSON.stringify({ name: currentLayer, count: r.saved }, null, 2);
+      // Reload so new features pick up their permanent ids (a second save
+      // with the local "new_N" ids would insert them again).
+      await loadLayer(currentLayer);
+      const parts = [`${r.inserted} added`, `${r.updated} changed`, `${r.deleted} deleted`];
+      const unstored = r.unstored_attributes || [];
+      if (unstored.length) {
+        setStatus(`saved ${r.layer}: ${parts.join(", ")} — not stored (the layer has no column for): ${unstored.join(", ")}`, "bad");
+      } else {
+        setStatus(`saved ${r.layer}: ${parts.join(", ")}`, "ok");
+      }
+      $info.textContent = JSON.stringify(r, null, 2);
     } catch (e) {
       setStatus(e.body?.detail || e.message, "bad");
     }

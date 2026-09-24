@@ -8,7 +8,7 @@ browser, writing back to whatever storage the world's `timeline.json` declares.
 ```
 ┌─────────────────────────────────┐         ┌──────────────────────────────┐
 │  frontend (Netlify-publishable) │ <─REST─>│  backend (FastAPI in Docker) │
-│  MapLibre GL + mapbox-gl-draw   │         │   /srv/ofm mounted at /ofm   │
+│  MapLibre GL + Terra Draw       │         │   /srv/ofm mounted at /ofm   │
 │  loads each world's map.json    │         │   PostGIS / SpatiaLite /     │
 │  directly as a Mapbox-GL style  │         │   GeoJSON-file adapters      │
 └─────────────────────────────────┘         └──────────────────────────────┘
@@ -27,7 +27,7 @@ raster-vectorizer/
 │   │   ├── geojson_file.py        writes raw/geojson/<layer>.geojson
 │   │   ├── spatialite.py          writes <world>/<world>.db (column: the_geom)
 │   │   └── postgis.py             writes shared PG host (column: geom)
-│   └── tests/                     23 pytest tests covering API + adapters
+│   └── tests/                     pytest suite (API, adapters, PostGIS saves)
 ├── frontend/                      static SPA, Netlify-ready
 │   ├── index.html
 │   ├── editor.js                  MapLibre setup + draw lifecycle
@@ -49,19 +49,23 @@ raster-vectorizer/
 ```bash
 cd /srv/ofm/raster-vectorizer
 
-# build + run tests
+# build + run tests (starts a throwaway PostGIS 12 for the PostGIS save tests)
 docker compose --profile test run --rm --build test
+docker compose --profile test down
 
 # launch the editor backend (bound to localhost:8765)
 docker compose up --build editor
 ```
 
-Environment variables (set in `.env` or your shell):
+Environment variables (copy `.env.example` to `.env`, which is git-ignored;
+`docker compose` refuses to start the editor without the two passwords):
 
 | var                  | purpose                                          | default          |
 |----------------------|--------------------------------------------------|------------------|
-| `OFM_EDITOR_USER`    | HTTP basic auth user (omit for open access)      | unset = open     |
-| `OFM_EDITOR_PASSWORD`| HTTP basic auth password                          | unset = open     |
+| `OFM_EDITOR_USER`    | HTTP basic auth user                             | required         |
+| `OFM_EDITOR_PASSWORD`| HTTP basic auth password                         | required         |
+| `OFM_EDITOR_OPEN`    | `1` = no auth, for local development only        | unset (closed)   |
+| `OFM_PG_PASSWORD`    | password of `OFM_PG_USER` on the shared PostGIS  | required         |
 | `OFM_CORS_ORIGINS`   | comma-separated allowed origins (Netlify URL)    | `*`              |
 | `OFM_PG_HOST/PORT/…` | override shared PG host for PostGIS adapter      | `51.15.160.236`  |
 
@@ -89,7 +93,8 @@ python3 -m http.server 5173    # any static server works
 
 ## REST API
 
-All routes under `/api`; require HTTP basic auth if `OFM_EDITOR_USER` is set.
+All routes under `/api` require HTTP basic auth. Without configured credentials
+the API refuses every request (503) unless `OFM_EDITOR_OPEN=1`.
 
 | route                                       | method | purpose |
 |---------------------------------------------|--------|---------|
@@ -99,7 +104,7 @@ All routes under `/api`; require HTTP basic auth if `OFM_EDITOR_USER` is set.
 | `/api/worlds/{slug}/style`                  | GET    | the world's Mapbox-GL style |
 | `/api/worlds/{slug}/layers`                 | GET    | layers known to the storage backend |
 | `/api/worlds/{slug}/layers/{layer}`         | GET    | FeatureCollection |
-| `/api/worlds/{slug}/layers/{layer}`         | PUT    | replace layer (FeatureCollection body) |
+| `/api/worlds/{slug}/layers/{layer}`         | PUT    | save layer (non-destructive, see below); returns what changed |
 | `/api/worlds/{slug}/layers/{layer}`         | DELETE | drop the layer |
 | `/api/worlds/{slug}/rasters`                                | GET    | list raster sources for this world (pyramids + GeoTIFFs) with zoom/bounds/extension |
 | `/api/worlds/{slug}/rasters/{source}/tiles/{z}/{x}/{y}.{ext}` | GET    | serve a tile from a named source (raw pyramid or rendered from GeoTIFF) |
@@ -121,6 +126,40 @@ Selected per-world from `timeline.json#mode`:
 
 If the configured adapter can't connect (e.g. PG unreachable from the
 container), the API returns 503 with a useful diagnostic message rather than 500.
+
+## Saving: non-destructive, with history
+
+A save never rewrites the layer wholesale (`backend/storage/diff.py`):
+
+- **Stable ids.** Every feature has a permanent `fid` (uuid). Older tables get a
+  `fid` column, backfilled, on their first save; until then they load with
+  `row:<pk>` ids, so merely reading a layer never alters it.
+- **Only what changed is written.** Incoming features are matched by id:
+  changed ones are updated, new ones inserted, missing ones deleted, identical
+  ones left alone. A property absent from a feature leaves the stored value
+  alone; an explicit `null` clears it.
+- **Every column is kept.** Properties go to the column of the same name (so
+  `from_time`, `to_time`, `subclass`, `wiki`, … survive), otherwise into the
+  `properties` JSON column when there is one. Anything with no place to go is
+  returned as `unstored_attributes` and shown in the editor instead of being
+  dropped.
+- **All or nothing.** The save is one transaction; a feature whose geometry
+  does not fit the layer (a line in a polygon layer) rejects the whole save with
+  HTTP 422. Single geometries are promoted to Multi when the column is Multi, and
+  Z/M coordinates are dropped (layers are XY).
+- **History.** Every insert, update and delete is recorded with full before and
+  after images and the editor's user name: in an `_ofm_history` table (PostGIS,
+  SpatiaLite) or `raw/history/<layer>.jsonl` (GeoJSON files).
+
+The PUT response reports `inserted`, `updated`, `deleted`, `unchanged` and
+`unstored_attributes`. The editor sends feature ids back, rejoins the parts of
+multi-part features it split for editing, and reloads after saving so new
+features pick up their permanent ids.
+
+Before this, saving truncated the table and re-inserted only `name`, `class`
+and `properties`: on PostGIS/SpatiaLite layers that keep attributes as columns
+one save erased them. `backend/tests/test_save_nondestructive.py` is the
+regression suite for that.
 
 ## E2E confirmed against planetos (2026-05-16)
 
@@ -277,14 +316,9 @@ crash the encode step.
 
 ## What's not done yet
 
-- **GeoTIFF support**: the tile route currently serves pre-baked tile pyramids.
-  GeoTIFF rendering via `rio-tiler`/`titiler` is the next iteration.
 - **`?storage=` override**: API currently follows `timeline.json#mode` strictly.
   Letting the user pick a non-default backend per-edit is on the roadmap.
 - **Vision-assist**: the old `segment`/`palette` CLI lives in `tools/` for batch
   use; not yet surfaced as a "trace by color" button in the editor UI.
-- **Schema-driven property forms**: the editor exposes raw key/value editing.
-  Loading a per-layer schema (from `gaia.json` or a sibling file) for typed
-  forms is on the roadmap.
 - **Temporal (atDate)**: OFM supports temporal queries; the editor ignores
   the date dimension for now.

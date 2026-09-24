@@ -62,9 +62,10 @@ def ofm_root(tmp_path: Path, monkeypatch) -> Path:
 
 @pytest.fixture
 def client(ofm_root, monkeypatch):
-    """A FastAPI test client with auth disabled (no creds in env)."""
+    """A FastAPI test client with auth explicitly opened (no creds, OFM_EDITOR_OPEN=1)."""
     monkeypatch.delenv("OFM_EDITOR_USER", raising=False)
     monkeypatch.delenv("OFM_EDITOR_PASSWORD", raising=False)
+    monkeypatch.setenv("OFM_EDITOR_OPEN", "1")
     from backend import app as app_mod
     from fastapi.testclient import TestClient
 

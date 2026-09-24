@@ -11,6 +11,10 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 _security = HTTPBasic(auto_error=False)
 
 
+def _open_mode() -> bool:
+    return os.environ.get("OFM_EDITOR_OPEN", "").lower() in ("1", "true", "yes")
+
+
 def _expected() -> tuple[str, str] | None:
     user = os.environ.get("OFM_EDITOR_USER")
     pw = os.environ.get("OFM_EDITOR_PASSWORD")
@@ -24,12 +28,18 @@ def require_user(
 ) -> str:
     """Reject unless credentials match OFM_EDITOR_USER/OFM_EDITOR_PASSWORD env.
 
-    If the env vars are unset, the service is open (useful for local dev /
-    docker compose without secrets).  Set both env vars to enable auth.
+    Fails closed: with no credentials configured every request is refused, unless
+    OFM_EDITOR_OPEN=1 is set explicitly (local development only).
     """
     expected = _expected()
     if expected is None:
-        return (credentials.username if credentials else None) or "anonymous"
+        if _open_mode():
+            return (credentials.username if credentials else None) or "anonymous"
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="editor credentials are not configured (set OFM_EDITOR_USER and "
+                   "OFM_EDITOR_PASSWORD, or OFM_EDITOR_OPEN=1 for local development)",
+        )
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

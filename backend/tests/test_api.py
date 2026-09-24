@@ -102,3 +102,28 @@ def test_delete_layer(client):
     assert r.status_code == 200
     r = client.get("/api/worlds/fakeworld/layers/markers")
     assert r.json() == {"type": "FeatureCollection", "features": []}
+
+
+def test_auth_fails_closed_without_credentials(monkeypatch, ofm_root):
+    """No configured credentials and no explicit OFM_EDITOR_OPEN: refuse everything."""
+    monkeypatch.delenv("OFM_EDITOR_USER", raising=False)
+    monkeypatch.delenv("OFM_EDITOR_PASSWORD", raising=False)
+    monkeypatch.delenv("OFM_EDITOR_OPEN", raising=False)
+    from backend import app as app_mod
+    from fastapi.testclient import TestClient
+
+    c = TestClient(app_mod.app)
+    r = c.get("/api/worlds")
+    assert r.status_code == 503
+    assert "OFM_EDITOR_OPEN" in r.json()["detail"]
+    assert c.get("/health").status_code == 200   # liveness stays public
+
+
+def test_save_reports_changes_and_rejects_bad_geometry(client):
+    pt = {"type": "Feature", "geometry": {"type": "Point", "coordinates": [0, 0]}, "properties": {"name": "a"}}
+    r = client.put("/api/worlds/fakeworld/layers/pts", json={"type": "FeatureCollection", "features": [pt]})
+    assert r.status_code == 200
+    assert (r.json()["inserted"], r.json()["updated"], r.json()["deleted"]) == (1, 0, 0)
+    r = client.put("/api/worlds/fakeworld/layers/pts", json={"type": "FeatureCollection",
+                                                          "features": [{**pt, "geometry": None}]})
+    assert r.status_code == 422
