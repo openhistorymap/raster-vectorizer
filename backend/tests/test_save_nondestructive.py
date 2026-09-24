@@ -255,3 +255,59 @@ def test_citations_column_is_added_and_round_trips(backend):
 
     updates = [r for r in history() if r["op"] == "update"]
     assert updates[0]["after"]["citations"] == cit and "citations" not in updates[0]["before"]
+
+
+# --------------------------------------------------------------------------- deck tables
+
+@pytest.fixture(params=["spatialite", "postgis"])
+def deck_backend(request, tmp_path):
+    """A starbase-style table: name with a colon, pk column `pk`, geometry `geom`, attribute `sta:class`."""
+    if request.param == "spatialite":
+        from backend.storage.spatialite import SpatiaLiteAdapter
+        wdir = tmp_path / "starbase"
+        wdir.mkdir()
+        a = SpatiaLiteAdapter(wdir)
+        a.conn.execute('CREATE TABLE "d1:walls" (pk INTEGER PRIMARY KEY AUTOINCREMENT, class TEXT, "sta:class" TEXT)')
+        a.conn.execute("SELECT AddGeometryColumn('d1:walls', 'geom', 4326, 'LINESTRING', 'XY')")
+        a.conn.execute("""INSERT INTO "d1:walls" (class, "sta:class", geom)
+                          VALUES ('bulkhead', 'hull', GeomFromText('LINESTRING(0 0, 0.0001 0)', 4326))""")
+        a.conn.commit()
+        return a
+    if not PG["host"]:
+        pytest.skip("set OFM_TEST_PG_HOST to run PostGIS tests")
+    import psycopg
+    from backend.storage.postgis import PostGISAdapter
+    a = PostGISAdapter(tmp_path, {k: v for k, v in PG.items() if v})
+    with psycopg.connect(a.dsn) as c:
+        c.execute('DROP TABLE IF EXISTS "d1:walls", _ofm_history')
+        c.execute('CREATE TABLE "d1:walls" (pk serial PRIMARY KEY, geom geometry(LINESTRING, 4326), '
+                  'class text, "sta:class" text)')
+        c.execute("""INSERT INTO "d1:walls" (class, "sta:class", geom)
+                     VALUES ('bulkhead', 'hull', ST_GeomFromText('LINESTRING(0 0, 0.0001 0)', 4326))""")
+    return a
+
+
+def test_deck_tables_with_colons_list_load_and_save(deck_backend):
+    a = deck_backend
+    assert {"name": "d1:walls", "count": 1} == {k: v for k, v in
+                                                next(l for l in a.list_layers() if l["name"] == "d1:walls").items()
+                                                if k in ("name", "count")}
+    fc = a.load_layer("d1:walls")
+    f = fc["features"][0]
+    assert f["properties"] == {"class": "bulkhead", "sta:class": "hull"}
+    f["properties"]["class"] = "door"
+    fc["features"].append({"type": "Feature", "geometry": {"type": "LineString", "coordinates": [[0, 0], [0, 0.0001]]},
+                           "properties": {"class": "bulkhead", "sta:class": "interior"}})
+    s = a.save_layer("d1:walls", fc, editor="tester")
+    assert (s["updated"], s["inserted"]) == (1, 1)
+    after = sorted((g["properties"]["class"], g["properties"]["sta:class"]) for g in a.load_layer("d1:walls")["features"])
+    assert after == [("bulkhead", "interior"), ("door", "hull")]
+
+
+def test_missing_layer_loads_empty_and_is_created_on_save(backend):
+    a, _ = backend
+    assert a.load_layer("d2:walls") == {"type": "FeatureCollection", "features": []}
+    s = a.save_layer("d2:walls", {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "geometry": LINE, "properties": {"name": "new wall"}}]})
+    assert s["inserted"] == 1
+    assert [f["properties"]["name"] for f in a.load_layer("d2:walls")["features"]] == ["new wall"]

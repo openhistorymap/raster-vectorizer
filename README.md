@@ -49,9 +49,11 @@ raster-vectorizer/
 ```bash
 cd /srv/ofm/raster-vectorizer
 
-# build + run tests (starts a throwaway PostGIS 12 for the PostGIS save tests)
-docker compose --profile test run --rm --build test
-docker compose --profile test down
+# build + run tests (starts a throwaway PostGIS 12 for the PostGIS save tests).
+# Use a separate project name: `down` on the default project would also stop
+# the deployed editor and frontend.
+docker compose -p rv-test --profile test run --rm --build test
+docker compose -p rv-test --profile test down -v
 
 # launch the editor backend (bound to localhost:8765)
 docker compose up --build editor

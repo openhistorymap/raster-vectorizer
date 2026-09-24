@@ -22,7 +22,8 @@ from shapely.geometry import shape
 from .diff import (CITATIONS, FID, HISTORY_TABLE, ROW_PREFIX, StoredRow, coerce_geometry, geometry_from_wkt,
                    history_record, new_fid, plan_save)
 
-SAFE_TABLE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+# Table names as OFM uses them, including per-deck tables such as "d1:walls" (quoted in SQL).
+SAFE_TABLE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_:.\-]{0,62}$")
 
 # Map GeoJSON geometry types → SpatiaLite column geometry types
 GEOM_TYPE_MAP = {
@@ -38,6 +39,11 @@ GEOM_TYPE_MAP = {
 # SpatiaLite geometry_columns.geometry_type codes (Z/M variants add 1000/2000/3000).
 GEOM_CODES = {0: "GEOMETRY", 1: "POINT", 2: "LINESTRING", 3: "POLYGON", 4: "MULTIPOINT",
               5: "MULTILINESTRING", 6: "MULTIPOLYGON", 7: "GEOMETRYCOLLECTION"}
+
+
+def ident(name: str) -> str:
+    """A plain identifier derived from a name (for index names)."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", name)[:63]
 
 
 def q(name: str) -> str:
@@ -94,7 +100,7 @@ class SpatiaLiteAdapter:
         if cur.fetchone():
             return
         self.conn.execute(
-            f"CREATE TABLE {layer} ("
+            f"CREATE TABLE {q(layer)} ("
             "id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,"
             f"{FID} TEXT NOT NULL UNIQUE,"
             "name TEXT NULL,"
@@ -102,7 +108,7 @@ class SpatiaLiteAdapter:
             "properties TEXT NULL)"
         )
         self.conn.execute(
-            f"SELECT AddGeometryColumn('{layer}', 'the_geom', 4326, '{geom_type}', 'XY', 1)"
+            "SELECT AddGeometryColumn(?, 'the_geom', 4326, ?, 'XY', 1)", (layer, geom_type)
         )
 
     def list_layers(self) -> list[dict[str, Any]]:
@@ -111,15 +117,16 @@ class SpatiaLiteAdapter:
         )
         rows = []
         for tbl, gtype in cur.fetchall():
-            cnt = self.conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
-            rows.append({"name": tbl, "count": cnt, "geometry_type": str(gtype)})
+            cnt = self.conn.execute(f"SELECT COUNT(*) FROM {q(tbl)}").fetchone()[0]
+            name = GEOM_CODES.get(int(gtype) % 1000, str(gtype)) if str(gtype).isdigit() else str(gtype)
+            rows.append({"name": tbl, "count": cnt, "geometry_type": name})
         return rows
 
     def _table_info(self, table: str) -> list[tuple[str, int]]:
         """[(column name, pk position), ...] in column order."""
         if not SAFE_TABLE.match(table):
             raise ValueError(f"unsafe table name: {table!r}")
-        return [(r[1], r[5]) for r in self.conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        return [(r[1], r[5]) for r in self.conn.execute(f"PRAGMA table_info({q(table)})").fetchall()]
 
     def _columns(self, table: str) -> list[str]:
         """Return ordered list of column names for the given table."""
@@ -156,7 +163,7 @@ class SpatiaLiteAdapter:
         other = [n for n in self._columns(table) if n != geom_col]
         quoted = ", ".join(q(n) for n in other)
         cur = self.conn.execute(
-            f"SELECT {quoted}, AsText({q(geom_col)}), rowid FROM {table}")
+            f"SELECT {quoted}, AsText({q(geom_col)}), rowid FROM {q(table)}")
         rows = []
         for r in cur.fetchall():
             d = dict(zip(other + ["_ofm_wkt", "_ofm_rowid"], r))
@@ -187,7 +194,7 @@ class SpatiaLiteAdapter:
         if not SAFE_TABLE.match(layer):
             raise ValueError(f"unsafe table name: {layer!r}")
         if not self._columns(layer):
-            raise RuntimeError(f"table not found or empty schema: {layer}")
+            return {"type": "FeatureCollection", "features": []}  # not created yet: empty
         _, pk, attrs, _ = self._layout(layer)
         features = []
         for r in self._read_rows(layer):
@@ -212,11 +219,11 @@ class SpatiaLiteAdapter:
     def _ensure_fid(self, layer: str) -> None:
         """Give an older table a stable, unique fid per row."""
         if FID not in self._columns(layer):
-            self.conn.execute(f"ALTER TABLE {layer} ADD COLUMN {FID} TEXT")
-        missing = self.conn.execute(f"SELECT rowid FROM {layer} WHERE {FID} IS NULL").fetchall()
+            self.conn.execute(f"ALTER TABLE {q(layer)} ADD COLUMN {FID} TEXT")
+        missing = self.conn.execute(f"SELECT rowid FROM {q(layer)} WHERE {FID} IS NULL").fetchall()
         for (rowid,) in missing:
-            self.conn.execute(f"UPDATE {layer} SET {FID} = ? WHERE rowid = ?", (new_fid(), rowid))
-        self.conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {layer}_{FID}_idx ON {layer} ({FID})")
+            self.conn.execute(f"UPDATE {q(layer)} SET {FID} = ? WHERE rowid = ?", (new_fid(), rowid))
+        self.conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {q(ident(layer + '_' + FID + '_idx'))} ON {q(layer)} ({FID})")
 
     def _ensure_history(self) -> None:
         self.conn.execute(
@@ -263,10 +270,10 @@ class SpatiaLiteAdapter:
             incoming = [{**f, "id": alias.get(str(f.get("id")), f.get("id"))} for f in feats]
             plan = plan_save(stored, incoming, attrs, has_props)
             if plan.needs_citations_column() and CITATIONS not in self._columns(layer):
-                self.conn.execute(f"ALTER TABLE {layer} ADD COLUMN {CITATIONS} TEXT")
+                self.conn.execute(f"ALTER TABLE {q(layer)} ADD COLUMN {CITATIONS} TEXT")
 
             for ch in plan.deletes:
-                self.conn.execute(f"DELETE FROM {layer} WHERE {FID} = ?", (ch.key,))
+                self.conn.execute(f"DELETE FROM {q(layer)} WHERE {FID} = ?", (ch.key,))
             for ch in plan.inserts:
                 names = list(ch.columns) + (["properties"] if ch.extras is not None else [])
                 values = [self._value(ch.columns[n]) for n in ch.columns]
@@ -277,7 +284,7 @@ class SpatiaLiteAdapter:
                     values.append(json.dumps(ch.citations, ensure_ascii=False))
                 col_list = ", ".join(q(n) for n in [FID, *names, geom_col])
                 ph = ", ".join(["?"] * (len(names) + 1) + ["GeomFromText(?, 4326)"])
-                self.conn.execute(f"INSERT INTO {layer} ({col_list}) VALUES ({ph})",
+                self.conn.execute(f"INSERT INTO {q(layer)} ({col_list}) VALUES ({ph})",
                                   (ch.fid, *values, wkt2d(coerce_geometry(ch.geometry, gtype))))
             for ch in plan.updates:
                 sets, values = [], []
@@ -293,7 +300,7 @@ class SpatiaLiteAdapter:
                 if ch.geometry is not None:
                     sets.append(f"{q(geom_col)} = GeomFromText(?, 4326)")
                     values.append(wkt2d(coerce_geometry(ch.geometry, gtype)))
-                self.conn.execute(f"UPDATE {layer} SET {', '.join(sets)} WHERE {FID} = ?",
+                self.conn.execute(f"UPDATE {q(layer)} SET {', '.join(sets)} WHERE {FID} = ?",
                                   (*values, ch.key))
             for op, changes in (("insert", plan.inserts), ("update", plan.updates),
                                 ("delete", plan.deletes)):
@@ -314,6 +321,6 @@ class SpatiaLiteAdapter:
     def delete_layer(self, layer: str) -> None:
         if not SAFE_TABLE.match(layer):
             raise ValueError(f"unsafe table name: {layer!r}")
-        self.conn.execute(f"SELECT DiscardGeometryColumn('{layer}', 'the_geom')")
-        self.conn.execute(f"DROP TABLE IF EXISTS {layer}")
+        self.conn.execute("SELECT DiscardGeometryColumn(?, 'the_geom')", (layer,))
+        self.conn.execute(f"DROP TABLE IF EXISTS {q(layer)}")
         self.conn.commit()

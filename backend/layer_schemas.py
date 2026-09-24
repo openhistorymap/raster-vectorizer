@@ -19,7 +19,7 @@ from typing import Any
 
 import jsonschema
 
-SAFE_NAME = re.compile(r"^[a-zA-Z0-9_\-]+$")
+SAFE_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_:.\-]{0,62}$")  # incl. deck tables like d1:walls
 
 
 def _dir(world_dir: Path) -> Path:

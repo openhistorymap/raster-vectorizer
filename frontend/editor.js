@@ -146,6 +146,7 @@ function readUrlState() {
     world: p.get("world"),
     mode:  p.get("mode"),    // "map" | "timeline" | "gaia" | "map_json" | "render" | "orbitals"
     layer: p.get("layer"),
+    deck:  p.get("deck"),
   };
 }
 
@@ -153,6 +154,7 @@ function writeUrlState(opts = {}) {
   const params = new URLSearchParams();
   if (currentWorld) params.set("world", currentWorld);
   if (currentMode && currentMode !== "map") params.set("mode", currentMode);
+  if (currentMode === "map" && currentDeck) params.set("deck", currentDeck);
   if (currentMode === "map" && currentLayer) params.set("layer", currentLayer);
   const qs = params.toString();
   const url = qs ? `?${qs}` : window.location.pathname;
@@ -310,10 +312,12 @@ let loadedFeatures = [];        // [{type:'Feature', id, geometry, properties}]
 let editedProperties = new Map(); // id -> partial properties (overrides)
 let editedCitations = new Map();  // id -> full replacement citations array (Cited GeoJSON)
 let sourcesRegistry = {};         // the world's sources, keyed by IRI
+let currentDeck = null;           // starbase worlds: the deck whose {deck} templates are filled in
+let layerToSource = {};           // storage layer name -> map.json source that renders it
 let selectedFeatureId = null;
 let nextLocalId = 1;
 
-async function loadWorldMap(slug) {
+async function loadWorldMap(slug, opts = {}) {
   setStatus(`loading world ${slug}…`);
   const [info, layers, rasters] = await Promise.all([
     fetchJSON(`/api/worlds/${slug}`),
@@ -329,12 +333,10 @@ async function loadWorldMap(slug) {
     rasters
       .map((r) => `<option value="${r.name}">${r.name} (${r.kind}, z${r.min_zoom}–${r.max_zoom})</option>`)
       .join("");
-  // pick the first raster as default if map.json doesn't reference statictiles
-  currentBasemap = rasters[0]?.name || null;
-  $basemap.value = currentBasemap || "";
   $basemap.onchange = () => {
     currentBasemap = $basemap.value || null;
-    loadWorldMap(slug);  // simplest: rebuild the map with the new basemap
+    // Rebuild the map with the new basemap, staying on the same layer.
+    loadWorldMap(slug, { keepLayer: currentLayer, basemapChosen: true });
   };
 
   const style = await fetchJSON(`/api/worlds/${slug}/style`).catch(() => null);
@@ -342,7 +344,19 @@ async function loadWorldMap(slug) {
     version: 8, sources: {},
     layers: [{ id: "bg", type: "background", paint: { "background-color": "#1a1f2b" } }],
   };
+
+  // Starbase worlds keep one set of layers per deck ({deck} in map.json URLs,
+  // "d1:walls"-style tables in storage). Pick the deck, then fill it in before
+  // the URLs are pointed at this backend.
+  const decks = setupDecks(safeStyle, slug);
+  substituteDeck(safeStyle, currentDeck);
   rewriteStyleUrls(safeStyle, slug);
+
+  // Default basemap: the current deck's own plan if there is one, else the first raster.
+  if (!opts.basemapChosen) {
+    currentBasemap = rasters.find((r) => r.name === currentDeck)?.name || rasters[0]?.name || null;
+  }
+  $basemap.value = currentBasemap || "";
   if (currentBasemap) injectBasemap(safeStyle, slug, currentBasemap, info);
   currentStyle = safeStyle;
 
@@ -369,6 +383,7 @@ async function loadWorldMap(slug) {
     style: safeStyle,
     center: info.timeline?.base ? [info.timeline.base.lng, info.timeline.base.lat] : [0, 0],
     zoom: info.timeline?.base?.zoom ?? 3,
+    maxZoom: 25,  // deck plans and building layers need more than MapLibre's default 22
     // MapLibre fetches tiles + GeoJSON sources itself (not via our fetchJSON
     // wrapper), so basic-auth wouldn't reach the backend without this hook.
     // We attach the Authorization header to any request pointed at API.
@@ -392,7 +407,7 @@ async function loadWorldMap(slug) {
   // table in storage not referenced by map.json is a legitimate edit target
   // too (just unstyled — features still load into the draw tool).
   const styleLayers = (safeStyle.layers || []);
-  const layerOptions = mergeLayerSources(safeStyle.sources || {}, layers, styleLayers);
+  const layerOptions = mergeLayerSources(safeStyle.sources || {}, layers, styleLayers, slug, decks);
   $layer.innerHTML = layerOptions
     .map((o) => `<option value="${o.name}">${o.label}</option>`)
     .join("");
@@ -404,7 +419,12 @@ async function loadWorldMap(slug) {
   }
   $layer.addEventListener("change", onLayerSelectChange);
   onLayerSelectChange.__bound = true;
-  if (layerOptions.length) await loadLayer(layerOptions[0].name);
+  const keep = opts.keepLayer && layerOptions.find((o) => o.name === opts.keepLayer);
+  if (layerOptions.length) {
+    const pick = keep ? keep.name : layerOptions[0].name;
+    $layer.value = pick;
+    await loadLayer(pick);
+  }
   else { $info.textContent = "(no layers yet — click + layer)"; currentLayer = null; }
 
   // Wire metadata.ofm features (togglable groups + time slider) once the map
@@ -576,18 +596,14 @@ function injectBasemap(style, slug, basemap, info) {
   const rest = style.layers.filter((l) => l.type !== "background");
   style.layers = [
     bg || { id: "bg", type: "background", paint: { "background-color": "#1a1f2b" } },
-    {
-      id: "ofm-basemap",
-      type: "raster",
-      source: "ofm-basemap",
-      minzoom: src.min_zoom ?? 0,
-      maxzoom: src.max_zoom ?? 22,
-    },
+    // No layer maxzoom: the source's maxzoom already says where tiles stop (MapLibre
+    // overzooms past it), and layer maxzoom above 24 is invalid and breaks the whole style.
+    { id: "ofm-basemap", type: "raster", source: "ofm-basemap", minzoom: src.min_zoom ?? 0 },
     ...rest,
   ];
 }
 
-function mergeLayerSources(sources, storageLayers, styleLayers) {
+function mergeLayerSources(sources, storageLayers, styleLayers, slug, decks = []) {
   // Returns an ordered list [{name, label}] suitable for the Layer dropdown.
   // Sources declared in map.json come first (they are the canonical model);
   // storage-only layers follow. Each label shows feature count + how many
@@ -600,27 +616,70 @@ function mergeLayerSources(sources, storageLayers, styleLayers) {
     if (!sl.source) continue;
     rendererCount.set(sl.source, (rendererCount.get(sl.source) || 0) + 1);
   }
-  for (const [name, src] of Object.entries(sources)) {
+  layerToSource = {};
+  const apiPrefix = `${API}/api/worlds/${slug}/layers/`;
+  for (const [sourceId, src] of Object.entries(sources)) {
     if (src.type && src.type !== "geojson") continue;  // raster/vector tiles aren't editable here
+    // The storage layer is whatever the source's (rewritten) URL points at — for
+    // starbases "walls" reads layer "d1:walls" — falling back to the source id.
+    const url = typeof src.data === "string" ? src.data : "";
+    const name = url.startsWith(apiPrefix)
+      ? decodeURIComponent(url.slice(apiPrefix.length).split("?")[0])
+      : sourceId;
     seen.add(name);
+    layerToSource[name] = sourceId;
     const st = storageBy[name];
     const count = st?.count ?? 0;
     const gt = st?.geometry_type ?? "?";
-    const rn = rendererCount.get(name) || 0;
+    const rn = rendererCount.get(sourceId) || 0;
     declared.push({
       name,
-      label: `${name} (${count}, ${gt}${rn ? `, ${rn} styled` : ""})`,
+      label: `${name === sourceId ? name : `${sourceId} · ${name}`} (${count}, ${gt}${rn ? `, ${rn} styled` : ""})`,
     });
   }
-  // anything in storage that map.json doesn't declare
+  // anything in storage that map.json doesn't declare (other decks' tables excluded)
   for (const l of storageLayers) {
     if (seen.has(l.name)) continue;
+    const prefix = l.name.includes(":") ? l.name.split(":")[0] : null;
+    if (prefix && decks.includes(prefix) && prefix !== currentDeck) continue;
     declared.push({
       name: l.name,
       label: `${l.name} (${l.count}, ${l.geometry_type}, ⚠ not in map.json)`,
     });
   }
   return declared;
+}
+
+// --- starbase decks -------------------------------------------------------
+
+function setupDecks(style, slug) {
+  const ofm = style?.metadata?.ofm || {};
+  const decks = ofm.type === "starbase" ? Object.keys(ofm.decks || {}) : [];
+  const $deck = document.getElementById("deck-select");
+  document.getElementById("deck-wrap").hidden = !decks.length;
+  if (!decks.length) { currentDeck = null; return decks; }
+  const wanted = currentDeck || readUrlState().deck;
+  currentDeck = decks.includes(wanted) ? wanted : decks[0];
+  $deck.innerHTML = decks.map((d) => `<option value="${d}">${ofm.decks[d]?.name || d}</option>`).join("");
+  $deck.value = currentDeck;
+  $deck.onchange = () => {
+    const previous = currentDeck;
+    currentDeck = $deck.value;
+    // Stay on the same kind of layer on the new deck: d1:walls -> d2:walls.
+    const keepLayer = currentLayer && currentLayer.startsWith(`${previous}:`)
+      ? `${currentDeck}:${currentLayer.slice(previous.length + 1)}` : currentLayer;
+    loadWorldMap(slug, { keepLayer }).then(() => writeUrlState({ replace: true }));
+  };
+  return decks;
+}
+
+function substituteDeck(style, deck) {
+  if (!deck) return;
+  const fill = (u) => u.replaceAll("{deck}", deck).replaceAll("%7Bdeck%7D", deck);
+  for (const s of Object.values(style.sources || {})) {
+    if (typeof s.data === "string") s.data = fill(s.data);
+    if (Array.isArray(s.tiles)) s.tiles = s.tiles.map(fill);
+  }
 }
 
 function rewriteStyleUrls(style, slug) {
@@ -695,9 +754,14 @@ async function loadLayer(name) {
     })),
   ]);
   currentLayerSchema = schema;
-  // Schema may have explicit geometryType; otherwise infer from first feature.
+  // Schema may have explicit geometryType; otherwise infer from the first feature, or —
+  // for an empty layer (e.g. a deck that has no walls yet) — from how map.json draws it.
   if (!schema.geometryType && fc.features?.[0]?.geometry?.type) {
     currentLayerSchema.geometryType = fc.features[0].geometry.type;
+  } else if (!schema.geometryType) {
+    const byStyle = { line: "LineString", fill: "Polygon", "fill-extrusion": "Polygon", circle: "Point", symbol: "Point" };
+    const drawn = (currentStyle?.layers || []).find((l) => l.source === (layerToSource[name] || name) && byStyle[l.type]);
+    if (drawn) currentLayerSchema.geometryType = byStyle[drawn.type];
   }
   loadFeaturesIntoState(fc);
   refreshAddFeatureBtn();
@@ -707,7 +771,7 @@ async function loadLayer(name) {
   hideStyleLayersForSource(name);
 
   const rendered = (currentStyle?.layers || [])
-    .filter((l) => l.source === name)
+    .filter((l) => l.source === (layerToSource[name] || name))
     .map((l) => `${l.id} (${l.type})`);
   $info.textContent = JSON.stringify(
     { name, count: fc.features?.length || 0, rendered_by: rendered },
@@ -725,8 +789,9 @@ let hiddenLayerIds = [];
 function hideStyleLayersForSource(sourceName) {
   if (!map) return;
   const run = () => {
+    const styleSource = layerToSource[sourceName] || sourceName;
     const targets = (currentStyle?.layers || [])
-      .filter((l) => l.source === sourceName)
+      .filter((l) => l.source === styleSource)
       .map((l) => l.id);
     for (const id of targets) {
       if (map.getLayer(id)) {

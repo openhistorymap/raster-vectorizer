@@ -27,7 +27,9 @@ from shapely.geometry import shape
 from .diff import (CITATIONS, FID, HISTORY_TABLE, ROW_PREFIX, SaveRejected, StoredRow, coerce_geometry,
                    geometry_from_wkt, history_record, plan_save)
 
-SAFE_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+# Table names as OFM uses them, including per-deck tables such as "d1:walls". They are always
+# quoted in SQL; the pattern only keeps out control characters and quotes.
+SAFE_IDENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_:.\-]{0,62}$")
 
 GEOM_TYPE_MAP = {
     "Point": "POINT",
@@ -39,6 +41,11 @@ GEOM_TYPE_MAP = {
 }
 
 JSON_TYPES = {"json", "jsonb"}
+
+
+def ident(name: str) -> str:
+    """A plain identifier derived from a name (for index names)."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", name)[:63]
 
 
 def q(name: str) -> str:
@@ -100,7 +107,7 @@ class PostGISAdapter:
     def _ensure_table(self, conn, layer: str, geom_type: str) -> None:
         self._check(layer)
         conn.execute(
-            f"CREATE TABLE IF NOT EXISTS {layer} ("
+            f"CREATE TABLE IF NOT EXISTS {q(layer)} ("
             "id SERIAL PRIMARY KEY,"
             f"{FID} uuid NOT NULL UNIQUE,"
             "name TEXT,"
@@ -109,22 +116,22 @@ class PostGISAdapter:
             f"geom geometry({geom_type}, 4326))"
         )
         conn.execute(
-            f"CREATE INDEX IF NOT EXISTS {layer}_geom_idx ON {layer} USING GIST (geom)"
+            f"CREATE INDEX IF NOT EXISTS {q(ident(layer + '_geom_idx'))} ON {q(layer)} USING GIST (geom)"
         )
 
     def _ensure_fid(self, conn, layer: str, cols: dict[str, str]) -> None:
         """Give an older table a stable, unique fid per row (PostgreSQL 12: no gen_random_uuid)."""
         if FID in cols:
             conn.execute(
-                f"UPDATE {layer} SET {FID} = md5(random()::text || clock_timestamp()::text)::uuid "
+                f"UPDATE {q(layer)} SET {FID} = md5(random()::text || clock_timestamp()::text)::uuid "
                 f"WHERE {FID} IS NULL")
             return
-        conn.execute(f"ALTER TABLE {layer} ADD COLUMN {FID} uuid")
+        conn.execute(f"ALTER TABLE {q(layer)} ADD COLUMN {FID} uuid")
         conn.execute(
-            f"UPDATE {layer} SET {FID} = md5(random()::text || clock_timestamp()::text || "
+            f"UPDATE {q(layer)} SET {FID} = md5(random()::text || clock_timestamp()::text || "
             f"ctid::text)::uuid")
-        conn.execute(f"ALTER TABLE {layer} ALTER COLUMN {FID} SET NOT NULL")
-        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {layer}_{FID}_idx ON {layer} ({FID})")
+        conn.execute(f"ALTER TABLE {q(layer)} ALTER COLUMN {FID} SET NOT NULL")
+        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {q(ident(layer + '_' + FID + '_idx'))} ON {q(layer)} ({FID})")
 
     def _ensure_history(self, conn) -> None:
         conn.execute(
@@ -152,7 +159,7 @@ class PostGISAdapter:
                 tbl = r["f_table_name"]
                 if not SAFE_IDENT.match(tbl):
                     continue
-                cnt = c.execute(f"SELECT COUNT(*) AS n FROM {tbl}").fetchone()["n"]
+                cnt = c.execute(f"SELECT COUNT(*) AS n FROM {q(tbl)}").fetchone()["n"]
                 out.append({"name": tbl, "count": cnt, "geometry_type": r["type"]})
             return out
 
@@ -184,29 +191,39 @@ class PostGISAdapter:
         return row["type"] if row else None
 
     @staticmethod
-    def _layout(cols: dict[str, str]) -> tuple[str, str | None, list[str]]:
+    def _primary_key(conn, table: str) -> str | None:
+        """The table's single-column primary key (e.g. `id`, `pk`, `ogc_fid`), from the catalogue."""
+        rows = conn.execute(
+            "SELECT a.attname FROM pg_index i JOIN pg_attribute a "
+            "ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+            "WHERE i.indrelid = to_regclass(%s) AND i.indisprimary", (q(table),)).fetchall()
+        return rows[0]["attname"] if len(rows) == 1 else None
+
+    def _layout(self, conn, table: str, cols: dict[str, str]) -> tuple[str, str | None, list[str]]:
         """(geometry column, primary-key column or None, attribute columns)."""
         geom_col = next((n for n, t in cols.items() if t == "geometry"), None)
         if geom_col is None:
             raise RuntimeError("no geometry column")
-        pk = "id" if "id" in cols else None
+        pk = self._primary_key(conn, table)
+        if pk is None and "id" in cols:
+            pk = "id"
         attrs = [n for n in cols if n not in (geom_col, pk, FID, "properties", CITATIONS)]
         return geom_col, pk, attrs
 
     def _read_rows(self, conn, layer: str, cols: dict[str, str]) -> list[dict[str, Any]]:
-        geom_col, _, _ = self._layout(cols)
+        geom_col, _, _ = self._layout(conn, layer, cols)
         other = [n for n in cols if n != geom_col]
         quoted = ", ".join(q(n) for n in other)
         return conn.execute(
-            f'SELECT {quoted}, ST_AsText({q(geom_col)}) AS _ofm_wkt FROM {layer}').fetchall()
+            f'SELECT {quoted}, ST_AsText({q(geom_col)}) AS _ofm_wkt FROM {q(layer)}').fetchall()
 
     def load_layer(self, layer: str) -> dict[str, Any]:
         self._check(layer)
         with self._conn() as c:
             cols = self._columns(c, layer)
             if not cols:
-                raise RuntimeError(f"table not found or empty schema: {layer}")
-            _, pk, attrs = self._layout(cols)
+                return {"type": "FeatureCollection", "features": []}  # not created yet: empty
+            _, pk, attrs = self._layout(c, layer, cols)
             feats = []
             for r in self._read_rows(c, layer, cols):
                 props = dict(r["properties"]) if isinstance(r.get("properties"), dict) else {}
@@ -246,7 +263,7 @@ class PostGISAdapter:
                 first = (feats[0].get("geometry") or {}).get("type", "Polygon")
                 self._ensure_table(c, layer, GEOM_TYPE_MAP.get(first, "GEOMETRY"))
                 cols = self._columns(c, layer)
-            geom_col, pk, attrs = self._layout(cols)
+            geom_col, pk, attrs = self._layout(c, layer, cols)
             self._ensure_fid(c, layer, cols)
             cols = self._columns(c, layer)
             self._ensure_history(c)
@@ -254,7 +271,7 @@ class PostGISAdapter:
             fid_cast = "::uuid" if cols[FID] == "uuid" else ""
             alloc_pk = self._pk_needs_value(c, layer, pk)
             if alloc_pk and feats:  # serialise pk allocation with other writers
-                c.execute(f"LOCK TABLE {layer} IN SHARE ROW EXCLUSIVE MODE")
+                c.execute(f"LOCK TABLE {q(layer)} IN SHARE ROW EXCLUSIVE MODE")
 
             rows = self._read_rows(c, layer, cols)
             pk_to_fid = {f"{ROW_PREFIX}{r[pk]}": str(r[FID]) for r in rows} if pk else {}
@@ -267,15 +284,15 @@ class PostGISAdapter:
             incoming = [{**f, "id": pk_to_fid.get(str(f.get("id")), f.get("id"))} for f in feats]
             plan = plan_save(stored, incoming, attrs, "properties" in cols)
             if plan.needs_citations_column() and CITATIONS not in cols:
-                c.execute(f"ALTER TABLE {layer} ADD COLUMN {CITATIONS} jsonb")
+                c.execute(f"ALTER TABLE {q(layer)} ADD COLUMN {CITATIONS} jsonb")
                 cols = self._columns(c, layer)
 
             with c.cursor() as cur:
                 for ch in plan.deletes:
-                    cur.execute(f"DELETE FROM {layer} WHERE {FID}::text = %s", (ch.key,))
+                    cur.execute(f"DELETE FROM {q(layer)} WHERE {FID}::text = %s", (ch.key,))
                 next_pk = None
                 if alloc_pk and plan.inserts:
-                    next_pk = cur.execute(f"SELECT COALESCE(MAX({q(pk)}), 0) + 1 AS n FROM {layer}").fetchone()["n"]
+                    next_pk = cur.execute(f"SELECT COALESCE(MAX({q(pk)}), 0) + 1 AS n FROM {q(layer)}").fetchone()["n"]
                 for ch in plan.inserts:
                     geom = coerce_geometry(ch.geometry, gtype)
                     names = list(ch.columns) + (["properties"] if ch.extras is not None else [])
@@ -291,7 +308,7 @@ class PostGISAdapter:
                         next_pk += 1
                     col_list = ", ".join(q(n) for n in [FID, *names, geom_col])
                     ph = ", ".join([f"%s{fid_cast}", *(["%s"] * len(names)), "ST_GeomFromText(%s, 4326)"])
-                    cur.execute(f"INSERT INTO {layer} ({col_list}) VALUES ({ph})",
+                    cur.execute(f"INSERT INTO {q(layer)} ({col_list}) VALUES ({ph})",
                                 (ch.fid, *values, wkt2d(geom)))
                 for ch in plan.updates:
                     sets, values = [], []
@@ -307,7 +324,7 @@ class PostGISAdapter:
                     if ch.geometry is not None:
                         sets.append(f"{q(geom_col)} = ST_GeomFromText(%s, 4326)")
                         values.append(wkt2d(coerce_geometry(ch.geometry, gtype)))
-                    cur.execute(f"UPDATE {layer} SET {', '.join(sets)} WHERE {FID}::text = %s",
+                    cur.execute(f"UPDATE {q(layer)} SET {', '.join(sets)} WHERE {FID}::text = %s",
                                 (*values, ch.key))
                 for op, changes in (("insert", plan.inserts), ("update", plan.updates),
                                     ("delete", plan.deletes)):
@@ -323,7 +340,7 @@ class PostGISAdapter:
     def delete_layer(self, layer: str) -> None:
         self._check(layer)
         with self._conn() as c:
-            c.execute(f"DROP TABLE IF EXISTS {layer}")
+            c.execute(f"DROP TABLE IF EXISTS {q(layer)}")
 
 
 __all__ = ["PostGISAdapter", "SaveRejected"]

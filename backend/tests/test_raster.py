@@ -207,3 +207,34 @@ def test_api_get_flat_aerial_tile(client, ofm_root):
     r = client.get("/api/worlds/fakeworld/rasters/aerial/tiles/14/8061/8009.png")
     assert r.status_code == 200
     assert r.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_projected_geotiff_bounds_are_reported_in_degrees(tmp_path):
+    """Starbase deck plans are EPSG:3857 GeoTIFFs a few tens of metres wide at the origin; their
+    bounds must come back as lng/lat near 0,0, not as metres read as degrees."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    from backend import raster
+
+    wdir = tmp_path / "starbase"
+    wdir.mkdir()
+    with rasterio.open(wdir / "d1.tif", "w", driver="GTiff", width=300, height=200, count=3, dtype="uint8",
+                       crs="EPSG:3857", transform=from_origin(-60.0, 47.5, 0.0084, 0.0084)) as dst:
+        dst.write(np.full((3, 200, 300), 128, np.uint8))
+    src = next(s for s in raster.discover(wdir) if s["name"] == "d1")
+    west, south, east, north = src["bounds"]
+    assert -0.001 < west < east < 0 and 0 < south < north < 0.001
+
+
+def test_max_zoom_follows_native_resolution(tmp_path):
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    from backend import raster
+    wdir = tmp_path / "w"
+    wdir.mkdir()
+    with rasterio.open(wdir / "deck.tif", "w", driver="GTiff", width=64, height=64, count=1, dtype="uint8",
+                       crs="EPSG:3857", transform=from_origin(0, 0, 0.0084, 0.0084)) as dst:
+        dst.write(np.zeros((1, 64, 64), np.uint8))
+    assert next(s for s in raster.discover(wdir) if s["name"] == "deck")["max_zoom"] == 25   # 0.0084 m/px

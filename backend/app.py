@@ -195,12 +195,7 @@ def append_features(slug: str, layer: str, body: dict[str, Any],
     if not isinstance(new, list) or not new:
         raise HTTPException(422, "body needs a non-empty `features` array")
     new = [{k: v for k, v in f.items() if k != "id"} for f in new]      # always inserts
-    try:
-        current = _call_or_503(wdir, "load_layer", layer)
-    except HTTPException as e:
-        if e.status_code != 503 or "not found" not in str(e.detail):
-            raise
-        current = {"features": []}                                      # new layer
+    current = _call_or_503(wdir, "load_layer", layer)                  # empty if it does not exist yet
     before = {str(f.get("id")) for f in current.get("features", [])}
     summary = _call_or_503(wdir, "save_layer", layer,
                            {"type": "FeatureCollection", "features": current.get("features", []) + new},

@@ -119,6 +119,22 @@ def _probe_pyramid(layer_dir: Path) -> dict[str, Any] | None:
     return None
 
 
+def _native_max_zoom(ds, fallback: int) -> int:
+    """The web-map zoom at which one tile pixel matches one raster pixel.
+
+    Deck plans are a few centimetres per pixel (zoom ~24); capping them at a default 22 would
+    stretch every tile 4× in the editor.
+    """
+    import math
+    try:
+        res = abs(ds.transform.a)
+        if ds.crs and ds.crs.is_geographic:
+            res *= 111_319.49  # degrees -> metres at the equator
+        return max(0, min(26, math.ceil(math.log2(156_543.034 / res))))
+    except Exception:
+        return fallback
+
+
 def _probe_geotiff(path: Path) -> dict[str, Any] | None:
     try:
         from rio_tiler.io import Reader
@@ -127,15 +143,15 @@ def _probe_geotiff(path: Path) -> dict[str, Any] | None:
     try:
         with Reader(str(path)) as src:
             info = src.info()
-            # info.bounds is in the dataset CRS; for the frontend we want
-            # geographic (lng/lat) bounds. src.geographic_bounds gives that.
-            try:
-                gbounds = list(src.geographic_bounds)
-            except Exception:
-                gbounds = list(getattr(info, "bounds", []))
+            # The frontend needs lng/lat bounds, but src.bounds is in the dataset's CRS — metres
+            # for EPSG:3857 rasters such as the starbase deck plans. Reproject explicitly (the old
+            # rio-tiler `geographic_bounds` property is gone; its fallback reported metres as
+            # degrees and put those worlds' maps thousands of kilometres away).
+            from rasterio.warp import transform_bounds
+            gbounds = list(transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21))
             return {
                 "min_zoom": int(getattr(info, "minzoom", 0)),
-                "max_zoom": int(getattr(info, "maxzoom", 22)),
+                "max_zoom": _native_max_zoom(src.dataset, int(getattr(info, "maxzoom", 22))),
                 "bounds": gbounds,           # [west, south, east, north] in EPSG:4326
                 "crs": str(getattr(src, "crs", "EPSG:3857")),
                 "ext": "png",

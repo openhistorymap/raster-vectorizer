@@ -129,7 +129,7 @@ function initMap() {
   if (map) { map.setStyle(style); map.once("styledata", addOverlayLayers); return; }
   map = new maplibregl.Map({
     container: "gr-map", style,
-    center: [base.lng ?? 0, base.lat ?? 0], zoom: base.zoom ?? 2,
+    center: [base.lng ?? 0, base.lat ?? 0], zoom: base.zoom ?? 2, maxZoom: 25,
   });
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
   map.on("load", addOverlayLayers);
