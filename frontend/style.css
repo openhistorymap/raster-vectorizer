@@ -679,3 +679,12 @@ body.mode-manifest #new-layer-btn {
 .citation-form .row2 > * { flex: 1; }
 .citation-form .supports { font-size: 12px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
 #deck-wrap[hidden] { display: none; }
+
+/* --- feature panel header and actions ---------------------------------- */
+.feature-head { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); }
+.feature-head .feature-id { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.feature-head .feature-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.mini-btn.danger { color: var(--danger); }
+.mini-btn.danger:hover { border-color: var(--danger); }
+.add-attr { display: flex; gap: 6px; margin-top: 8px; }
+.add-attr input { flex: 1; min-width: 0; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; font-size: 12px; }

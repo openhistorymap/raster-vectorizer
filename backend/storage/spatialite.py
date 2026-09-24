@@ -20,7 +20,7 @@ import shapely
 from shapely.geometry import shape
 
 from .diff import (CITATIONS, FID, HISTORY_TABLE, ROW_PREFIX, StoredRow, coerce_geometry, geometry_from_wkt,
-                   history_record, new_fid, plan_save)
+                   history_record, new_columns, new_fid, plan_save)
 
 # Table names as OFM uses them, including per-deck tables such as "d1:walls" (quoted in SQL).
 SAFE_TABLE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_:.\-]{0,62}$")
@@ -269,6 +269,16 @@ class SpatiaLiteAdapter:
                                 citations=self._list(r.get(CITATIONS))) for r in rows]
             incoming = [{**f, "id": alias.get(str(f.get("id")), f.get("id"))} for f in feats]
             plan = plan_save(stored, incoming, attrs, has_props)
+            # Attributes the table has no place for: add typed columns, then plan again.
+            added = new_columns(incoming, plan.unstored, "spatialite") if plan.unstored else {}
+            if added:
+                for name, sql_type in added.items():
+                    self.conn.execute(f"ALTER TABLE {q(layer)} ADD COLUMN {q(name)} {sql_type}")
+                geom_col, pk, attrs, has_props = self._layout(layer)
+                for r in stored:
+                    r.columns.update({name: None for name in added})
+                plan = plan_save(stored, incoming, attrs, has_props)
+                plan.added_columns = set(added)
             if plan.needs_citations_column() and CITATIONS not in self._columns(layer):
                 self.conn.execute(f"ALTER TABLE {q(layer)} ADD COLUMN {CITATIONS} TEXT")
 

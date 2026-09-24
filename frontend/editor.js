@@ -313,6 +313,8 @@ let editedProperties = new Map(); // id -> partial properties (overrides)
 let editedCitations = new Map();  // id -> full replacement citations array (Cited GeoJSON)
 let sourcesRegistry = {};         // the world's sources, keyed by IRI
 let currentDeck = null;           // starbase worlds: the deck whose {deck} templates are filled in
+let selectedPart = null;          // the loadedFeatures entry that was clicked (one part of a multi)
+let shapeEdit = null;             // { tdId, part } while a feature's shape is being edited in Terra Draw
 let layerToSource = {};           // storage layer name -> map.json source that renders it
 let selectedFeatureId = null;
 let nextLocalId = 1;
@@ -394,6 +396,14 @@ async function loadWorldMap(slug, opts = {}) {
     },
   });
   map.addControl(new maplibregl.NavigationControl(), "top-right");
+  // Readiness is tracked per map instance (see whenMapReady).
+  map.__ofmReady = false;
+  map.__ofmPending = [];
+  const thisMap = map;
+  map.once("load", () => {
+    thisMap.__ofmReady = true;
+    for (const fn of thisMap.__ofmPending.splice(0)) fn();
+  });
 
   // Terra Draw — modern, MapLibre-native replacement for mapbox-gl-draw.
   // Lazy-init after map.load to ensure the style is attached first.
@@ -800,9 +810,7 @@ function hideStyleLayersForSource(sourceName) {
       }
     }
   };
-  // If we're called before MapLibre has finished loading the style, defer.
-  if (map.isStyleLoaded()) run();
-  else map.once("load", run);
+  whenMapReady(run);
 }
 
 function restoreHiddenLayers() {
@@ -842,6 +850,7 @@ function onSelectionChange(e) {
   // a definition exists.
   const allKeys = Array.from(new Set([...Object.keys(schemaProps), ...Object.keys(props)]));
   $props.innerHTML = "";
+  if (selectedPart && String(f.id) === selectedPart.id) $props.appendChild(featureHeader(f));
   for (const k of allKeys) {
     const defn = schemaProps[k] || {};
     const v = props[k];
@@ -873,7 +882,130 @@ function onSelectionChange(e) {
       setDirty(true);
     });
   });
+  if (selectedPart && String(f.id) === selectedPart.id) $props.appendChild(addAttributeRow(String(f.id)));
   renderCitations(String(f.id));
+}
+
+// --- feature actions: zoom, reshape, delete, add attribute -----------------
+
+function showSelected() {
+  if (!selectedPart) { $props.textContent = "select a feature to edit its properties"; return; }
+  onSelectionChange({ features: [{ id: selectedPart.id, geometry: selectedPart.geometry,
+    properties: { ...(selectedPart.properties || {}), ...(editedProperties.get(selectedPart.id) || {}) } }] });
+}
+
+function featureHeader(f) {
+  const head = document.createElement("div");
+  head.className = "feature-head";
+  const parts = loadedFeatures.filter((x) => x.id === selectedPart.id).length;
+  const id = String(f.id);
+  head.innerHTML = `<div class="feature-id" title="${id}"></div>
+    <div class="feature-actions">
+      <button class="mini-btn" data-act="zoom" title="Zoom to this feature">zoom</button>
+      <button class="mini-btn" data-act="shape" title="Move vertices of this feature (Enter to keep, Esc to cancel)">${shapeEdit ? "done" : "edit shape"}</button>
+      <button class="mini-btn danger" data-act="delete" title="Delete this feature (Delete key)">delete</button>
+    </div>`;
+  head.querySelector(".feature-id").textContent =
+    `${selectedPart.geometry.type}${parts > 1 ? ` · part of ${parts}` : ""} · ${id.startsWith("new_") ? "new" : id.slice(0, 13)}`;
+  head.querySelector('[data-act="zoom"]').onclick = zoomToSelected;
+  head.querySelector('[data-act="shape"]').onclick = () => (shapeEdit ? finishShapeEdit(true) : startShapeEdit());
+  head.querySelector('[data-act="delete"]').onclick = deleteSelected;
+  return head;
+}
+
+function addAttributeRow(id) {
+  const row = document.createElement("form");
+  row.className = "add-attr";
+  row.innerHTML = `<input name="key" placeholder="new attribute" autocomplete="off" />
+    <button class="mini-btn" type="submit">+ attribute</button>`;
+  row.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const key = row.key.value.trim();
+    if (!key) return;
+    const cur = editedProperties.get(id) || {};
+    if (key in cur || key in (selectedPart?.properties || {})) { setStatus(`"${key}" already exists`, "bad"); return; }
+    cur[key] = "";
+    editedProperties.set(id, cur);
+    setDirty(true);
+    showSelected();
+    $props.querySelector(`[data-key="${CSS.escape(key)}"]`)?.focus();
+  });
+  return row;
+}
+
+function geometryBounds(g) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of iterCoords(g)) {
+    minX = Math.min(minX, x); minY = Math.min(minY, y); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+  }
+  return [[minX, minY], [maxX, maxY]];
+}
+
+function* iterCoords(g) {
+  const walk = function* (c) {
+    if (typeof c[0] === "number") yield c;
+    else for (const x of c) yield* walk(x);
+  };
+  yield* walk(g.coordinates);
+}
+
+function zoomToSelected() {
+  if (!selectedPart) return;
+  map.fitBounds(geometryBounds(selectedPart.geometry), { padding: 120, maxZoom: 24, duration: 400 });
+}
+
+function deleteSelected() {
+  if (!selectedPart) return;
+  const id = selectedPart.id;
+  const n = loadedFeatures.filter((x) => x.id === id).length;
+  if (n > 1 && !confirm(`This feature has ${n} parts. Delete the whole feature? (Cancel deletes only the clicked part.)`)) {
+    loadedFeatures = loadedFeatures.filter((x) => x !== selectedPart);
+  } else {
+    loadedFeatures = loadedFeatures.filter((x) => x.id !== id);
+    editedProperties.delete(id);
+    editedCitations.delete(id);
+  }
+  selectedFeatureId = null;
+  selectedPart = null;
+  refreshFeatureSource();
+  $props.textContent = "select a feature to edit its properties";
+  setDirty(true);
+  setStatus("deleted — save to apply", "ok");
+}
+
+function startShapeEdit() {
+  if (!selectedPart || !draw) return;
+  const mode = { Polygon: "polygon", LineString: "linestring", Point: "point" }[selectedPart.geometry.type];
+  if (!mode) { setStatus(`cannot reshape a ${selectedPart.geometry.type}`, "bad"); return; }
+  const tdId = uuidv4();
+  const result = draw.addFeatures([{ id: tdId, type: "Feature", geometry: selectedPart.geometry, properties: { mode } }]);
+  if (result?.[0] && result[0].valid === false) {
+    setStatus(`this shape cannot be edited: ${result[0].reason || "invalid geometry"}`, "bad");
+    return;
+  }
+  shapeEdit = { tdId, part: selectedPart };
+  draw.setMode("select");
+  draw.selectFeature(tdId);
+  refreshFeatureSource();
+  showSelected();
+  setStatus("drag vertices (midpoints add new ones) · Enter or Done keeps the shape · Esc cancels", "ok");
+}
+
+function finishShapeEdit(keep) {
+  if (!shapeEdit) return;
+  const { tdId, part } = shapeEdit;
+  const edited = draw.getSnapshot().find((x) => x.id === tdId);
+  shapeEdit = null;
+  if (keep && edited && JSON.stringify(edited.geometry) !== JSON.stringify(part.geometry)) {
+    part.geometry = edited.geometry;
+    setDirty(true);
+    setStatus("shape changed — save to apply", "ok");
+  } else {
+    setStatus(keep ? "shape unchanged" : "shape edit cancelled");
+  }
+  try { draw.removeFeatures([tdId]); } catch {}
+  refreshFeatureSource();
+  showSelected();
 }
 
 // --- citations (Cited GeoJSON) ------------------------------------------
@@ -1038,13 +1170,16 @@ function initTerraDraw() {
   // When the user finishes drawing a feature (closes a polygon, dbl-clicks a
   // line, single-clicks a point), seed it with schema defaults, switch to
   // select mode, surface property form.
-  draw.on("finish", (id) => onFinishDraw(id));
+  draw.on("finish", (id, context) => onFinishDraw(id, context));
   // Any change (drag, vertex move, etc.) dirties the editor.
   draw.on("change", (_ids, type) => {
     if (type !== "styling") setDirty(true);
   });
-  draw.on("select", (id) => onTerraSelect(id));
-  draw.on("deselect", () => $props.textContent = "select a feature to edit its properties");
+  draw.on("select", (id) => { if (!shapeEdit || id !== shapeEdit.tdId) onTerraSelect(id); });
+  draw.on("deselect", () => {
+    if (shapeEdit) finishShapeEdit(true);                // clicking away keeps the new shape
+    else if (!selectedFeatureId) $props.textContent = "select a feature to edit its properties";
+  });
 
   // If a layer was loaded before draw initialised, refresh display now.
   refreshFeatureSource();
@@ -1085,6 +1220,8 @@ function loadFeaturesIntoState(fc) {
     }));
   editedProperties.clear();
   editedCitations.clear();
+  selectedPart = null;
+  if (shapeEdit) { try { draw.removeFeatures([shapeEdit.tdId]); } catch {} shapeEdit = null; }
   selectedFeatureId = null;
   // Clear terra-draw so any leftover in-progress geometry doesn't bleed in.
   if (draw) { try { draw.clear(); } catch {} }
@@ -1092,15 +1229,20 @@ function loadFeaturesIntoState(fc) {
   setStatus(`loaded ${loadedFeatures.length} features`);
 }
 
+// Run `fn` once the current map has loaded its style — immediately if it already has.
+// Not map.isStyleLoaded(): that is also false whenever any tile or GeoJSON source
+// is still loading, and waiting for a later 'styledata'/'load' event then never
+// ends (the editing layers were never added while the basemap streamed in).
+function whenMapReady(fn) {
+  if (!map) return;
+  if (map.__ofmReady) fn();
+  else if (!map.__ofmPending.includes(fn)) map.__ofmPending.push(fn);
+}
+
 function refreshFeatureSource() {
   if (!map) return;
-  if (!map.isStyleLoaded()) {
-    // 'load' fires once; 'styledata' fires repeatedly so it's safer for the
-    // case where additional sources are loaded after initial style.load.
-    map.once("styledata", refreshFeatureSource);
-    return;
-  }
-  const features = loadedFeatures.map((f) => ({
+  if (!map.__ofmReady) { whenMapReady(refreshFeatureSource); return; }
+  const features = loadedFeatures.filter((f) => f !== shapeEdit?.part).map((f) => ({
     type: "Feature",
     id: f.id,
     geometry: f.geometry,
@@ -1159,6 +1301,7 @@ function refreshFeatureSource() {
   // issues when the layer was just added — switching to a manual
   // queryRenderedFeatures dispatch eliminates them.
   map.on("click", (e) => {
+    if (shapeEdit) return;  // Terra Draw owns clicks while a shape is being edited
     const ourLayers = ["_ofm_features_fill", "_ofm_features_line", "_ofm_features_circle", "_ofm_features_outline"];
     const presentLayers = ourLayers.filter((id) => map.getLayer(id));
     const all = map.queryRenderedFeatures(e.point);
@@ -1174,6 +1317,7 @@ function refreshFeatureSource() {
     }
     if (selectedFeatureId) {
       selectedFeatureId = null;
+      selectedPart = null;
       refreshFeatureSource();
       $props.textContent = "select a feature to edit its properties";
     }
@@ -1219,7 +1363,9 @@ function onMapFeatureClick(e) {
       return;
     }
   }
+  if (shapeEdit) finishShapeEdit(true);
   selectedFeatureId = mine.id;
+  selectedPart = mine;
   refreshFeatureSource();
   onSelectionChange({
     features: [{
@@ -1323,10 +1469,16 @@ $addFeatureBtn.addEventListener("click", () => {
 });
 
 document.addEventListener("keydown", (e) => {
+  if (e.target.closest?.("input, textarea, select")) return;
+  if (shapeEdit && (e.key === "Enter" || e.key === "Escape")) {
+    finishShapeEdit(e.key === "Enter");
+    return;
+  }
   if (e.key === "Escape" && draw) {
     draw.setMode("select");
     setStatus("draw cancelled");
   }
+  if ((e.key === "Delete" || e.key === "Backspace") && selectedPart && !shapeEdit) deleteSelected();
 });
 
 function onTerraSelect(id) {
@@ -1335,12 +1487,21 @@ function onTerraSelect(id) {
   onSelectionChange({ features: [f] });
 }
 
-function onFinishDraw(id) {
+// Terra Draw keeps its own bookkeeping in feature properties.
+const TERRA_DRAW_PROPS = ["mode", "selected", "edited", "midPoint", "selectionPoint", "closingPoint",
+                          "coordinatePoint", "coordinatePointIds", "currentlyDrawing", "snappingPoint"];
+
+function onFinishDraw(id, context) {
+  // "finish" also fires when a vertex drag ends in select mode — that is a
+  // reshape of an existing feature, not a new one (see finishShapeEdit).
+  if (shapeEdit && id === shapeEdit.tdId) return;
+  if (context?.mode === "select") return;
   setDirty(true);
   const f = draw.getSnapshot().find((x) => x.id === id);
   if (!f) return;
-  // Strip Terra Draw's internal `mode` prop, apply schema defaults.
-  const { mode, ...userProps } = f.properties || {};
+  // Strip Terra Draw's internal props, apply schema defaults.
+  const userProps = { ...(f.properties || {}) };
+  for (const k of TERRA_DRAW_PROPS) delete userProps[k];
   const schemaProps = currentLayerSchema?.properties || {};
   for (const [k, defn] of Object.entries(schemaProps)) {
     if (userProps[k] !== undefined) continue;

@@ -25,7 +25,7 @@ import shapely
 from shapely.geometry import shape
 
 from .diff import (CITATIONS, FID, HISTORY_TABLE, ROW_PREFIX, SaveRejected, StoredRow, coerce_geometry,
-                   geometry_from_wkt, history_record, plan_save)
+                   geometry_from_wkt, history_record, new_columns, plan_save)
 
 # Table names as OFM uses them, including per-deck tables such as "d1:walls". They are always
 # quoted in SQL; the pattern only keeps out control characters and quotes.
@@ -283,6 +283,18 @@ class PostGISAdapter:
                 citations=_json_list(r.get(CITATIONS))) for r in rows]
             incoming = [{**f, "id": pk_to_fid.get(str(f.get("id")), f.get("id"))} for f in feats]
             plan = plan_save(stored, incoming, attrs, "properties" in cols)
+            # Attributes the table has no place for (and no `properties` column to hold them):
+            # add typed columns in this same transaction, then plan again.
+            added = new_columns(incoming, plan.unstored, "postgis") if plan.unstored else {}
+            if added:
+                for name, sql_type in added.items():
+                    c.execute(f"ALTER TABLE {q(layer)} ADD COLUMN {q(name)} {sql_type}")
+                cols = self._columns(c, layer)
+                geom_col, pk, attrs = self._layout(c, layer, cols)
+                for r in stored:
+                    r.columns.update({name: None for name in added})
+                plan = plan_save(stored, incoming, attrs, "properties" in cols)
+                plan.added_columns = set(added)
             if plan.needs_citations_column() and CITATIONS not in cols:
                 c.execute(f"ALTER TABLE {q(layer)} ADD COLUMN {CITATIONS} jsonb")
                 cols = self._columns(c, layer)

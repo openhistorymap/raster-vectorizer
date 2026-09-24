@@ -156,12 +156,22 @@ def test_insert_delete_and_history(backend):
     assert all(r["editor"] == "tester" and r["layer"] == "politics" for r in h)
 
 
-def test_unknown_attributes_are_reported_not_silently_dropped(backend):
+def test_new_attributes_get_typed_columns_and_odd_names_are_reported(backend):
+    """No `properties` column: a new attribute becomes a column (typed from its values);
+    a name that cannot be a column is reported, never silently dropped."""
     a, _ = backend
     fc = a.load_layer("politics")
-    _by_name(fc)["Wengnga"]["properties"]["population"] = 60_000_000
+    w = _by_name(fc)["Wengnga"]["properties"]
+    w["population"] = 60_000_000
+    w["capital"] = "Ngendani"
+    w["bad;name"] = "x"
     s = a.save_layer("politics", fc)
-    assert s["unstored_attributes"] == ["population"]
+    assert s["added_columns"] == ["capital", "population"]
+    assert s["unstored_attributes"] == ["bad;name"]
+    assert s["updated"] == 1
+    p = _by_name(a.load_layer("politics"))["Wengnga"]["properties"]
+    assert p["population"] == 60_000_000 and p["capital"] == "Ngendani"
+    assert "population" not in _by_name(a.load_layer("politics"))["Fisar"]["properties"]
 
 
 def test_explicit_null_clears_but_absent_keeps(backend):

@@ -18,6 +18,7 @@ inside the same transaction as the change.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -96,6 +97,7 @@ class SavePlan:
     deletes: list[RowChange] = field(default_factory=list)
     unchanged: int = 0
     unstored: set[str] = field(default_factory=set)
+    added_columns: set[str] = field(default_factory=set)
 
     def needs_citations_column(self) -> bool:
         return any(ch.citations for ch in self.inserts + self.updates)
@@ -109,6 +111,7 @@ class SavePlan:
             "deleted": len(self.deletes),
             "unchanged": self.unchanged,
             "unstored_attributes": sorted(self.unstored),
+            "added_columns": sorted(self.added_columns),
         }
 
 
@@ -199,6 +202,34 @@ def plan_save(stored: list[StoredRow], incoming: list[dict], columns: list[str],
                 key=row.key, fid=row.key, columns={}, extras=None, geometry=None,
                 before=_image(row.columns, row.extras, row.geometry, row.citations), after=None))
     return plan
+
+
+NEW_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_:.\- ]{0,62}$")
+SQL_TYPES = {
+    "postgis": {"bool": "boolean", "int": "bigint", "float": "double precision", "text": "text"},
+    "spatialite": {"bool": "INTEGER", "int": "INTEGER", "float": "REAL", "text": "TEXT"},
+}
+
+
+def new_columns(features: list[dict], keys: set[str], dialect: str) -> dict[str, str]:
+    """Columns to add for attributes a table cannot hold yet: {name: SQL type}, typed from the
+    values sent (bool / int / float, anything else text). Unsafe names are left unstored."""
+    out = {}
+    for key in sorted(keys):
+        if not NEW_COLUMN.match(key):
+            continue
+        values = [f.get("properties", {}).get(key) for f in features]
+        values = [v for v in values if v is not None and v != ""]
+        if values and all(isinstance(v, bool) for v in values):
+            kind = "bool"
+        elif values and all(isinstance(v, int) and not isinstance(v, bool) for v in values):
+            kind = "int"
+        elif values and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+            kind = "float"
+        else:
+            kind = "text"
+        out[key] = SQL_TYPES[dialect][kind]
+    return out
 
 
 def history_record(layer: str, change: RowChange, op: str, editor: str | None) -> dict[str, Any]:
